@@ -638,3 +638,97 @@ fn nested_mapping() {
         ]
     );
 }
+
+// === Quoted scalars ===
+
+#[test]
+fn double_quoted_scalar() {
+    let tokens = scan("\"hello world\"\n");
+    assert_eq!(
+        (tokens[1].0, tokens[1].1.as_str()),
+        (TokenKind::Scalar, "hello world")
+    );
+}
+
+#[test]
+fn single_quoted_scalar() {
+    let tokens = scan("'hello world'\n");
+    assert_eq!(
+        (tokens[1].0, tokens[1].1.as_str()),
+        (TokenKind::Scalar, "hello world")
+    );
+}
+
+#[test]
+fn double_quoted_escape_sequences() {
+    let tokens = scan("\"a\\nb\\tc\"\n");
+    assert_eq!(tokens[1].1, "a\nb\tc");
+}
+
+#[test]
+fn double_quoted_backslash_escape() {
+    let tokens = scan("\"a\\\\b\"\n");
+    assert_eq!(tokens[1].1, "a\\b");
+}
+
+#[test]
+fn double_quoted_quote_escape() {
+    let tokens = scan("\"a\\\"b\"\n");
+    assert_eq!(tokens[1].1, "a\"b");
+}
+
+#[test]
+fn single_quoted_apostrophe_escape() {
+    let tokens = scan("'it''s'\n");
+    assert_eq!(tokens[1].1, "it's");
+}
+
+#[test]
+fn quoted_scalar_as_key() {
+    let tokens = scan("\"key\": value\n");
+    assert_eq!(tokens[1].0, TokenKind::BlockMappingStart);
+    assert_eq!(tokens[2].0, TokenKind::Key);
+    assert_eq!(
+        (tokens[3].0, tokens[3].1.as_str()),
+        (TokenKind::Scalar, "key")
+    );
+    assert_eq!(tokens[4].0, TokenKind::Value);
+}
+
+#[test]
+fn single_quoted_as_key() {
+    let tokens = scan("'key': value\n");
+    assert_eq!(tokens[2].0, TokenKind::Key);
+    assert_eq!(tokens[3].1, "key");
+}
+
+#[test]
+fn quoted_scalar_as_value() {
+    let tokens = scan("key: \"value\"\n");
+    assert_eq!(tokens[5].1, "value");
+}
+
+#[test]
+fn empty_double_quoted() {
+    let tokens = scan("\"\"\n");
+    assert_eq!((tokens[1].0, tokens[1].1.as_str()), (TokenKind::Scalar, ""));
+}
+
+#[test]
+fn empty_single_quoted() {
+    let tokens = scan("''\n");
+    assert_eq!((tokens[1].0, tokens[1].1.as_str()), (TokenKind::Scalar, ""));
+}
+
+#[test]
+fn double_quoted_unicode_escape() {
+    let tokens = scan("\"\\u0041\"\n"); // \u0041 = 'A'
+    assert_eq!(tokens[1].1, "A");
+}
+
+#[test]
+fn quoted_in_flow_sequence() {
+    let tokens = scan("[\"a\", 'b']\n");
+    assert_eq!(tokens[2].1, "a");
+    assert_eq!(tokens[4].1, "b");
+}
