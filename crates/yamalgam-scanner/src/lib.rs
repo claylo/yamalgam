@@ -6,6 +6,9 @@
 //! parser layer to handle.
 #![deny(unsafe_code)]
 
+pub mod input;
+pub mod reader;
+
 mod atom;
 mod style;
 mod token;

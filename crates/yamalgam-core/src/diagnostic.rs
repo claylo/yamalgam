@@ -22,7 +22,7 @@ pub enum Severity {
 pub struct Mark {
     /// Zero-indexed line number.
     pub line: u32,
-    /// Zero-indexed column number (in bytes).
+    /// Zero-indexed column number (in characters).
     pub column: u32,
     /// Byte offset from start of input.
     pub offset: usize,
