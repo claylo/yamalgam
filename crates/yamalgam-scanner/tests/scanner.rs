@@ -44,20 +44,26 @@ fn stream_end_span_reflects_input_length() {
     let input = "hello";
     let scanner = Scanner::new(input);
     let tokens = scanner.collect::<Result<Vec<_>, _>>().unwrap();
-    let end_token = &tokens[1];
+    let end_token = tokens.last().unwrap();
 
+    assert_eq!(end_token.kind, TokenKind::StreamEnd);
     assert_eq!(end_token.atom.span.start.offset, input.len());
 }
 
 #[test]
-fn nonempty_input_detects_value_indicator() {
-    // Content is skipped, but `: ` is now recognized as a Value indicator.
+fn nonempty_input_produces_full_mapping() {
+    // Plain scalar + simple key resolution produce full mapping tokens.
     assert_eq!(
         kinds("key: value\n"),
         vec![
             TokenKind::StreamStart,
+            TokenKind::BlockMappingStart,
+            TokenKind::Key,
+            TokenKind::Scalar,
             TokenKind::Value,
-            TokenKind::StreamEnd
+            TokenKind::Scalar,
+            TokenKind::BlockEnd,
+            TokenKind::StreamEnd,
         ]
     );
 }
@@ -105,14 +111,18 @@ fn explicit_document_end() {
 }
 
 #[test]
-fn document_start_and_end_with_content_skipped() {
-    // Content between markers is skipped, but `: ` is detected as Value.
+fn document_with_content_between_markers() {
     assert_eq!(
         kinds("---\nkey: value\n...\n"),
         vec![
             TokenKind::StreamStart,
             TokenKind::DocumentStart,
+            TokenKind::BlockMappingStart,
+            TokenKind::Key,
+            TokenKind::Scalar,
             TokenKind::Value,
+            TokenKind::Scalar,
+            TokenKind::BlockEnd,
             TokenKind::DocumentEnd,
             TokenKind::StreamEnd,
         ]
@@ -156,11 +166,10 @@ fn triple_dash_not_at_column_zero_is_not_document_start() {
 
 #[test]
 fn triple_dash_without_trailing_blank_is_not_document_start() {
-    // ---x is a scalar, not a document start. Content is skipped.
-    assert_eq!(
-        kinds("---x\n"),
-        vec![TokenKind::StreamStart, TokenKind::StreamEnd]
-    );
+    // ---x is a scalar, not a document start.
+    let k = kinds("---x\n");
+    assert!(!k.contains(&TokenKind::DocumentStart));
+    assert!(k.contains(&TokenKind::Scalar));
 }
 
 #[test]
@@ -292,14 +301,16 @@ fn flow_mapping_empty() {
 
 #[test]
 fn flow_entry_comma() {
-    // Scalars between commas are skipped; commas produce FlowEntry.
     assert_eq!(
         kinds("[a, b, c]"),
         vec![
             TokenKind::StreamStart,
             TokenKind::FlowSequenceStart,
+            TokenKind::Scalar,
             TokenKind::FlowEntry,
+            TokenKind::Scalar,
             TokenKind::FlowEntry,
+            TokenKind::Scalar,
             TokenKind::FlowSequenceEnd,
             TokenKind::StreamEnd,
         ]
@@ -374,14 +385,15 @@ fn version_directive_yaml_11() {
 
 #[test]
 fn block_sequence_entry() {
-    // Scalars are skipped; block structure tokens are emitted.
     assert_eq!(
         kinds("- a\n- b\n"),
         vec![
             TokenKind::StreamStart,
             TokenKind::BlockSequenceStart,
             TokenKind::BlockEntry,
+            TokenKind::Scalar,
             TokenKind::BlockEntry,
+            TokenKind::Scalar,
             TokenKind::BlockEnd,
             TokenKind::StreamEnd,
         ]
@@ -398,6 +410,7 @@ fn nested_block_sequence() {
             TokenKind::BlockEntry,
             TokenKind::BlockSequenceStart,
             TokenKind::BlockEntry,
+            TokenKind::Scalar,
             TokenKind::BlockEnd,
             TokenKind::BlockEnd,
             TokenKind::StreamEnd,
@@ -414,6 +427,7 @@ fn block_entry_after_document_start() {
             TokenKind::DocumentStart,
             TokenKind::BlockSequenceStart,
             TokenKind::BlockEntry,
+            TokenKind::Scalar,
             TokenKind::BlockEnd,
             TokenKind::StreamEnd,
         ]
@@ -428,23 +442,9 @@ fn explicit_key() {
             TokenKind::StreamStart,
             TokenKind::BlockMappingStart,
             TokenKind::Key,
+            TokenKind::Scalar,
             TokenKind::Value,
-            TokenKind::BlockEnd,
-            TokenKind::StreamEnd,
-        ]
-    );
-}
-
-#[test]
-fn value_indicator() {
-    // Standalone `: ` in block context emits Value.
-    assert_eq!(
-        kinds("? a\n: b\n"),
-        vec![
-            TokenKind::StreamStart,
-            TokenKind::BlockMappingStart,
-            TokenKind::Key,
-            TokenKind::Value,
+            TokenKind::Scalar,
             TokenKind::BlockEnd,
             TokenKind::StreamEnd,
         ]
@@ -459,6 +459,7 @@ fn block_sequence_dedent_produces_block_end() {
             TokenKind::StreamStart,
             TokenKind::BlockSequenceStart,
             TokenKind::BlockEntry,
+            TokenKind::Scalar,
             TokenKind::BlockEnd,
             TokenKind::StreamEnd,
         ]
@@ -477,6 +478,7 @@ fn multiple_dedents_produce_multiple_block_ends() {
             TokenKind::BlockEntry,
             TokenKind::BlockSequenceStart,
             TokenKind::BlockEntry,
+            TokenKind::Scalar,
             TokenKind::BlockEnd,
             TokenKind::BlockEnd,
             TokenKind::BlockEnd,
@@ -494,8 +496,144 @@ fn document_end_unrolls_block_indent() {
             TokenKind::DocumentStart,
             TokenKind::BlockSequenceStart,
             TokenKind::BlockEntry,
+            TokenKind::Scalar,
             TokenKind::BlockEnd,
             TokenKind::DocumentEnd,
+            TokenKind::StreamEnd,
+        ]
+    );
+}
+
+// === Plain scalars ===
+
+#[test]
+fn plain_scalar_key_value() {
+    let tokens = scan("key: value\n");
+    assert_eq!(tokens[0].0, TokenKind::StreamStart);
+    assert_eq!(tokens[1].0, TokenKind::BlockMappingStart);
+    assert_eq!(tokens[2].0, TokenKind::Key);
+    assert_eq!(
+        (tokens[3].0, tokens[3].1.as_str()),
+        (TokenKind::Scalar, "key")
+    );
+    assert_eq!(tokens[4].0, TokenKind::Value);
+    assert_eq!(
+        (tokens[5].0, tokens[5].1.as_str()),
+        (TokenKind::Scalar, "value")
+    );
+    assert_eq!(tokens[6].0, TokenKind::BlockEnd);
+    assert_eq!(tokens[7].0, TokenKind::StreamEnd);
+}
+
+#[test]
+fn multiple_key_value_pairs() {
+    assert_eq!(
+        kinds("a: 1\nb: 2\n"),
+        vec![
+            TokenKind::StreamStart,
+            TokenKind::BlockMappingStart,
+            TokenKind::Key,
+            TokenKind::Scalar,
+            TokenKind::Value,
+            TokenKind::Scalar,
+            TokenKind::Key,
+            TokenKind::Scalar,
+            TokenKind::Value,
+            TokenKind::Scalar,
+            TokenKind::BlockEnd,
+            TokenKind::StreamEnd,
+        ]
+    );
+}
+
+#[test]
+fn standalone_scalar() {
+    let tokens = scan("hello\n");
+    assert_eq!(tokens[0].0, TokenKind::StreamStart);
+    assert_eq!(
+        (tokens[1].0, tokens[1].1.as_str()),
+        (TokenKind::Scalar, "hello")
+    );
+    assert_eq!(tokens[2].0, TokenKind::StreamEnd);
+}
+
+#[test]
+fn scalar_in_sequence() {
+    let tokens = scan("- hello\n- world\n");
+    let k: Vec<_> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(
+        k,
+        vec![
+            TokenKind::StreamStart,
+            TokenKind::BlockSequenceStart,
+            TokenKind::BlockEntry,
+            TokenKind::Scalar,
+            TokenKind::BlockEntry,
+            TokenKind::Scalar,
+            TokenKind::BlockEnd,
+            TokenKind::StreamEnd,
+        ]
+    );
+    assert_eq!(tokens[3].1, "hello");
+    assert_eq!(tokens[5].1, "world");
+}
+
+#[test]
+fn scalar_trailing_whitespace_trimmed() {
+    let tokens = scan("key : value\n");
+    assert_eq!(tokens[3].1, "key");
+    assert_eq!(tokens[5].1, "value");
+}
+
+#[test]
+fn scalar_with_comment() {
+    let tokens = scan("hello # comment\n");
+    assert_eq!(
+        (tokens[1].0, tokens[1].1.as_str()),
+        (TokenKind::Scalar, "hello")
+    );
+}
+
+#[test]
+fn flow_sequence_with_scalars() {
+    let tokens = scan("[a, b, c]");
+    let k: Vec<_> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(
+        k,
+        vec![
+            TokenKind::StreamStart,
+            TokenKind::FlowSequenceStart,
+            TokenKind::Scalar,
+            TokenKind::FlowEntry,
+            TokenKind::Scalar,
+            TokenKind::FlowEntry,
+            TokenKind::Scalar,
+            TokenKind::FlowSequenceEnd,
+            TokenKind::StreamEnd,
+        ]
+    );
+    assert_eq!(tokens[2].1, "a");
+    assert_eq!(tokens[4].1, "b");
+    assert_eq!(tokens[6].1, "c");
+}
+
+#[test]
+fn nested_mapping() {
+    assert_eq!(
+        kinds("a:\n  b: c\n"),
+        vec![
+            TokenKind::StreamStart,
+            TokenKind::BlockMappingStart,
+            TokenKind::Key,
+            TokenKind::Scalar,
+            TokenKind::Value,
+            TokenKind::BlockMappingStart,
+            TokenKind::Key,
+            TokenKind::Scalar,
+            TokenKind::Value,
+            TokenKind::Scalar,
+            TokenKind::BlockEnd,
+            TokenKind::BlockEnd,
             TokenKind::StreamEnd,
         ]
     );
