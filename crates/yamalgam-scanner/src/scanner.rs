@@ -121,6 +121,25 @@ impl<'input> Scanner<'input> {
         }
     }
 
+    /// Build a scalar token with owned or borrowed data and explicit style.
+    fn scalar_token(
+        data: Cow<'input, str>,
+        style: ScalarStyle,
+        start: yamalgam_core::Mark,
+        end: yamalgam_core::Mark,
+    ) -> Token<'input> {
+        Token {
+            kind: TokenKind::Scalar,
+            atom: Atom {
+                data,
+                span: Span { start, end },
+                style,
+                chomp: Chomp::default(),
+                flags: AtomFlags::empty(),
+            },
+        }
+    }
+
     // -- Stream markers --
 
     /// Emit `StreamStart` and transition to `Stream`.
@@ -477,6 +496,242 @@ impl<'input> Scanner<'input> {
         }
     }
 
+    // -- Quoted scalars --
+
+    /// Fetch a single-quoted scalar (`'...'`).
+    ///
+    /// The only escape in single-quoted scalars is `''` → `'`.
+    // cref: fy_reader_fetch_flow_scalar_handle (fy-reader.c) — single-quoted branch
+    fn fetch_single_quoted_scalar(&mut self) {
+        let start_mark = self.reader.mark();
+        self.reader.advance(); // skip opening '
+
+        let mut result = String::new();
+        let mut needs_owned = false;
+
+        loop {
+            match self.reader.peek() {
+                None => break, // unterminated — accept what we have
+                Some('\'') => {
+                    self.reader.advance();
+                    if self.reader.peek() == Some('\'') {
+                        // '' → literal '
+                        self.reader.advance();
+                        result.push('\'');
+                        needs_owned = true;
+                    } else {
+                        // end of string
+                        break;
+                    }
+                }
+                Some(c) => {
+                    result.push(c);
+                    self.reader.advance();
+                }
+            }
+        }
+
+        let end_mark = self.reader.mark();
+        let data = if needs_owned {
+            Cow::Owned(result)
+        } else {
+            // No escapes — borrow from input (content between quotes).
+            let content_start = start_mark.offset + 1; // after opening '
+            let content_end = end_mark.offset.saturating_sub(1); // before closing '
+            if content_start <= content_end {
+                Cow::Borrowed(self.reader.slice(content_start, content_end))
+            } else {
+                Cow::Borrowed("")
+            }
+        };
+
+        self.push_quoted_scalar(data, ScalarStyle::SingleQuoted, start_mark, end_mark);
+    }
+
+    /// Fetch a double-quoted scalar (`"..."`), processing escape sequences.
+    // cref: fy_reader_fetch_flow_scalar_handle (fy-reader.c) — double-quoted branch
+    fn fetch_double_quoted_scalar(&mut self) {
+        let start_mark = self.reader.mark();
+        self.reader.advance(); // skip opening "
+
+        let mut result = String::new();
+        let mut needs_owned = false;
+
+        loop {
+            match self.reader.peek() {
+                None => break, // unterminated
+                Some('"') => {
+                    self.reader.advance();
+                    break;
+                }
+                Some('\\') => {
+                    needs_owned = true;
+                    self.reader.advance(); // skip backslash
+                    match self.reader.peek() {
+                        Some('\\') => {
+                            result.push('\\');
+                            self.reader.advance();
+                        }
+                        Some('"') => {
+                            result.push('"');
+                            self.reader.advance();
+                        }
+                        Some('n') => {
+                            result.push('\n');
+                            self.reader.advance();
+                        }
+                        Some('t') => {
+                            result.push('\t');
+                            self.reader.advance();
+                        }
+                        Some('r') => {
+                            result.push('\r');
+                            self.reader.advance();
+                        }
+                        Some('0') => {
+                            result.push('\0');
+                            self.reader.advance();
+                        }
+                        Some('a') => {
+                            result.push('\x07');
+                            self.reader.advance();
+                        }
+                        Some('b') => {
+                            result.push('\x08');
+                            self.reader.advance();
+                        }
+                        Some('e') => {
+                            result.push('\x1B');
+                            self.reader.advance();
+                        }
+                        Some('f') => {
+                            result.push('\x0C');
+                            self.reader.advance();
+                        }
+                        Some('v') => {
+                            result.push('\x0B');
+                            self.reader.advance();
+                        }
+                        Some('/') => {
+                            result.push('/');
+                            self.reader.advance();
+                        }
+                        Some(' ') => {
+                            result.push(' ');
+                            self.reader.advance();
+                        }
+                        Some('_') => {
+                            result.push('\u{A0}');
+                            self.reader.advance();
+                        }
+                        Some('N') => {
+                            result.push('\u{85}');
+                            self.reader.advance();
+                        }
+                        Some('L') => {
+                            result.push('\u{2028}');
+                            self.reader.advance();
+                        }
+                        Some('P') => {
+                            result.push('\u{2029}');
+                            self.reader.advance();
+                        }
+                        Some('x') => {
+                            self.reader.advance();
+                            if let Some(ch) = self.scan_unicode_escape(2) {
+                                result.push(ch);
+                            }
+                        }
+                        Some('u') => {
+                            self.reader.advance();
+                            if let Some(ch) = self.scan_unicode_escape(4) {
+                                result.push(ch);
+                            }
+                        }
+                        Some('U') => {
+                            self.reader.advance();
+                            if let Some(ch) = self.scan_unicode_escape(8) {
+                                result.push(ch);
+                            }
+                        }
+                        Some(c) => {
+                            // Unknown escape — keep as-is.
+                            result.push('\\');
+                            result.push(c);
+                            self.reader.advance();
+                        }
+                        None => {
+                            result.push('\\');
+                        }
+                    }
+                }
+                Some(c) => {
+                    result.push(c);
+                    self.reader.advance();
+                }
+            }
+        }
+
+        let end_mark = self.reader.mark();
+        let data = if needs_owned {
+            Cow::Owned(result)
+        } else {
+            let content_start = start_mark.offset + 1;
+            let content_end = end_mark.offset.saturating_sub(1);
+            if content_start <= content_end {
+                Cow::Borrowed(self.reader.slice(content_start, content_end))
+            } else {
+                Cow::Borrowed("")
+            }
+        };
+
+        self.push_quoted_scalar(data, ScalarStyle::DoubleQuoted, start_mark, end_mark);
+    }
+
+    /// Read `n` hex digits and return the corresponding Unicode character.
+    fn scan_unicode_escape(&mut self, n: usize) -> Option<char> {
+        let mut code: u32 = 0;
+        for _ in 0..n {
+            let c = self.reader.peek()?;
+            let digit = c.to_digit(16)?;
+            code = code * 16 + digit;
+            self.reader.advance();
+        }
+        char::from_u32(code)
+    }
+
+    /// Push a quoted scalar to the queue with simple key resolution.
+    fn push_quoted_scalar(
+        &mut self,
+        data: Cow<'input, str>,
+        style: ScalarStyle,
+        start_mark: yamalgam_core::Mark,
+        end_mark: yamalgam_core::Mark,
+    ) {
+        // Simple key resolution: if `:` + blank follows, this is a key.
+        let is_key = self.reader.peek() == Some(':')
+            && is_blank_or_end(self.reader.peek_at(1))
+            && self.flow_level == 0;
+
+        if is_key {
+            let col = start_mark.column as i32;
+            self.roll_indent(col, true);
+            self.queue
+                .push_back(Self::marker_token(TokenKind::Key, start_mark, start_mark));
+        }
+
+        let scalar = Self::scalar_token(data, style, start_mark, end_mark);
+        self.queue.push_back(scalar);
+
+        if is_key {
+            let v_start = self.reader.mark();
+            self.reader.advance(); // skip ':'
+            let v_end = self.reader.mark();
+            self.queue
+                .push_back(Self::marker_token(TokenKind::Value, v_start, v_end));
+        }
+    }
+
     // -- Helpers --
 
     /// Check if the next characters match `prefix`.
@@ -600,8 +855,18 @@ impl<'input> Scanner<'input> {
                 }
             }
 
+            // Quoted scalars.
+            if c == '\'' {
+                self.fetch_single_quoted_scalar();
+                continue;
+            }
+            if c == '"' {
+                self.fetch_double_quoted_scalar();
+                continue;
+            }
+
             // Everything else is a plain scalar (or content we don't
-            // handle yet, like quoted scalars, anchors, tags).
+            // handle yet, like anchors, tags, block scalars).
             // cref: fy_fetch_plain_scalar (fy-parse.c:5496)
             self.fetch_plain_scalar();
         }
