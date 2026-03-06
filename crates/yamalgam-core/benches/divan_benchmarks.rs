@@ -1,0 +1,39 @@
+//! Divan benchmarks for yamalgam-core
+//!
+//! Wall-clock time benchmarks for fast local iteration.
+//! Run with: `cargo bench --bench divan_benchmarks`
+//!
+//! AUTO-GENERATED from crates/yamalgam-core/benches/benchmarks.kdl.
+//! Do not edit directly. Run `cargo xtask gen-benchmarks` to regenerate.
+//!
+//! See docs/benchmarks-howto.md for more information.
+
+// Benchmark code doesn't need documentation.
+#![allow(missing_docs)]
+
+use std::hint::black_box;
+
+use yamalgam_core::config::{Config, ConfigLoader};
+
+fn main() {
+    divan::main();
+}
+
+mod config {
+    use super::*;
+
+    #[divan::bench]
+    fn load_defaults() -> Config {
+        let (config, _sources) = ConfigLoader::new()
+            .with_user_config(false)
+            .without_boundary_marker()
+            .load()
+            .expect("default config should always load successfully");
+        black_box(config)
+    }
+
+    #[divan::bench]
+    fn construct_loader() -> ConfigLoader {
+        black_box(ConfigLoader::new())
+    }
+}

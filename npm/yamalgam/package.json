@@ -1,0 +1,29 @@
+{
+  "name": "@claylo/yamalgam",
+  "version": "0.1.0",
+  "description": "A modern, production-ready Rust CLI application.",
+  "license": "(Apache-2.0 OR MIT)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/claylo/yamalgam"
+  },
+  "bin": {
+    "yamalgam": "cli.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "index.js",
+    "cli.js",
+    "install.js"
+  ],
+  "optionalDependencies": {
+    "@claylo/yamalgam-darwin-arm64": "0.1.0",
+    "@claylo/yamalgam-darwin-x64": "0.1.0",
+    "@claylo/yamalgam-linux-arm64": "0.1.0",
+    "@claylo/yamalgam-linux-x64": "0.1.0",
+    "@claylo/yamalgam-win32-arm64": "0.1.0",
+    "@claylo/yamalgam-win32-x64": "0.1.0"
+  }
+}
