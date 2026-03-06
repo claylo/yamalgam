@@ -400,6 +400,83 @@ impl<'input> Scanner<'input> {
             .push_back(Self::marker_token(TokenKind::Value, start, end));
     }
 
+    // -- Plain scalars --
+
+    /// Scan a plain scalar's text content.
+    ///
+    /// Reads characters until a terminator is reached. Trailing whitespace
+    /// is trimmed. The reader is left positioned at the terminator.
+    ///
+    /// Terminators:
+    /// - EOF, newline
+    /// - `:` followed by blank/EOF (value indicator)
+    /// - `#` preceded by whitespace (comment)
+    /// - `,` `[` `]` `{` `}` in flow context
+    // cref: fy_reader_fetch_plain_scalar_handle (fy-reader.c)
+    fn scan_plain_scalar_text(&mut self) -> &'input str {
+        let start_offset = self.reader.mark().offset;
+        let mut prev_was_space = false;
+
+        loop {
+            match self.reader.peek() {
+                None | Some('\n' | '\r') => break,
+                Some(':') if is_blank_or_end(self.reader.peek_at(1)) => break,
+                Some('#') if prev_was_space => break,
+                Some(',' | '[' | ']' | '{' | '}') if self.flow_level > 0 => break,
+                Some(c) => {
+                    prev_was_space = c == ' ' || c == '\t';
+                    self.reader.advance();
+                }
+            }
+        }
+
+        let end_offset = self.reader.mark().offset;
+        self.reader.slice(start_offset, end_offset).trim_end()
+    }
+
+    /// Fetch a plain scalar token, resolving simple keys eagerly.
+    ///
+    /// After scanning the scalar text, checks if `:` + blank follows.
+    /// If so, this scalar is a mapping key — inserts `BlockMappingStart`
+    /// (if indent warrants) and `Key` before the scalar, then advances
+    /// past `:` and pushes `Value`.
+    // cref: fy_fetch_plain_scalar (fy-parse.c:5151)
+    fn fetch_plain_scalar(&mut self) {
+        let start_mark = self.reader.mark();
+        let text = self.scan_plain_scalar_text();
+        let end_mark = self.reader.mark();
+
+        if text.is_empty() {
+            // Nothing scanned (e.g., hit a terminator immediately).
+            // Skip the character to avoid infinite loop.
+            self.reader.advance();
+            return;
+        }
+
+        // Simple key resolution: if `:` + blank follows, this scalar is a key.
+        let is_key = self.flow_level == 0
+            && self.reader.peek() == Some(':')
+            && is_blank_or_end(self.reader.peek_at(1));
+
+        if is_key {
+            let col = start_mark.column as i32;
+            self.roll_indent(col, true); // may push BlockMappingStart
+            self.queue
+                .push_back(Self::marker_token(TokenKind::Key, start_mark, start_mark));
+        }
+
+        let scalar = Self::data_token(TokenKind::Scalar, text, start_mark, end_mark);
+        self.queue.push_back(scalar);
+
+        if is_key {
+            let v_start = self.reader.mark();
+            self.reader.advance(); // skip ':'
+            let v_end = self.reader.mark();
+            self.queue
+                .push_back(Self::marker_token(TokenKind::Value, v_start, v_end));
+        }
+    }
+
     // -- Helpers --
 
     /// Check if the next characters match `prefix`.
@@ -523,8 +600,10 @@ impl<'input> Scanner<'input> {
                 }
             }
 
-            // Unknown content — skip past it.
-            self.reader.advance();
+            // Everything else is a plain scalar (or content we don't
+            // handle yet, like quoted scalars, anchors, tags).
+            // cref: fy_fetch_plain_scalar (fy-parse.c:5496)
+            self.fetch_plain_scalar();
         }
     }
 }
