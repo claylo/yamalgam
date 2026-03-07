@@ -113,6 +113,9 @@ pub struct Scanner<'input> {
     next_token_id: u64,
     /// Number of tokens consumed (popped) from the queue.
     tokens_consumed: u64,
+    /// Deferred error from a void fetch method (e.g., invalid escape).
+    /// Checked and drained by the dispatch loop.
+    error: Option<ScanError>,
 }
 
 impl<'input> Scanner<'input> {
@@ -129,6 +132,7 @@ impl<'input> Scanner<'input> {
             simple_keys: Vec::new(),
             simple_key_allowed: true,
             pending_complex_key_column: -1,
+            error: None,
             adjacent_value_offset: None,
             next_token_id: 0,
             tokens_consumed: 0,
@@ -1181,7 +1185,12 @@ impl<'input> Scanner<'input> {
 
         loop {
             match self.reader.peek() {
-                None => break, // unterminated — accept what we have
+                None => {
+                    self.error = Some(ScanError {
+                        message: "unterminated single-quoted scalar".to_string(),
+                    });
+                    return;
+                }
                 Some('\'') => {
                     self.reader.advance();
                     if self.reader.peek() == Some('\'') {
@@ -1262,7 +1271,12 @@ impl<'input> Scanner<'input> {
 
         loop {
             match self.reader.peek() {
-                None => break, // unterminated
+                None => {
+                    self.error = Some(ScanError {
+                        message: "unterminated double-quoted scalar".to_string(),
+                    });
+                    return;
+                }
                 Some('"') => {
                     self.reader.advance();
                     break;
@@ -1368,13 +1382,20 @@ impl<'input> Scanner<'input> {
                             // No character pushed — lines are joined seamlessly.
                         }
                         Some(c) => {
-                            // Unknown escape — keep as-is.
-                            result.push('\\');
-                            result.push(c);
+                            // Invalid escape sequence — error per YAML §5.7.
                             self.reader.advance();
+                            self.error = Some(ScanError {
+                                message: format!(
+                                    "invalid escape character '\\{c}' in double-quoted scalar"
+                                ),
+                            });
+                            return;
                         }
                         None => {
-                            result.push('\\');
+                            self.error = Some(ScanError {
+                                message: "unterminated escape in double-quoted scalar".to_string(),
+                            });
+                            return;
                         }
                     }
                     // Protect escape-produced content from trailing-whitespace
@@ -1523,6 +1544,12 @@ impl<'input> Scanner<'input> {
     // cref: fy_fetch_tokens (fy-parse.c:5250)
     fn fetch_next_token(&mut self) -> Option<Result<Token<'input>, ScanError>> {
         loop {
+            // Drain deferred error from a void fetch method.
+            if let Some(err) = self.error.take() {
+                self.state = State::Done;
+                return Some(Err(err));
+            }
+
             // Yield from queue only when all simple keys are resolved.
             if !self.needs_more_tokens()
                 && let Some(token) = self.queue.pop_front()
