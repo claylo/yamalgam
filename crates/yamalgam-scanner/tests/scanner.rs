@@ -886,7 +886,7 @@ fn double_quoted_literal_tab_stripped_on_fold() {
 fn tag_uri_percent_decoding() {
     // YAML §6.9.1: percent-encoded characters in tag suffixes are decoded.
     // `%21` → `!` (6CK3).
-    let tokens = scan("!e!tag%21 value\n");
+    let tokens = scan("%TAG !e! tag:example.com,\n---\n!e!tag%21 value\n");
     let tag = tokens.iter().find(|t| t.0 == TokenKind::Tag).unwrap();
     assert_eq!(tag.1, "!e!tag!");
 }
@@ -1088,7 +1088,7 @@ fn verbatim_tag() {
 
 #[test]
 fn named_tag_handle() {
-    let tokens = scan("!e!suffix hello\n");
+    let tokens = scan("%TAG !e! tag:example.com,\n---\n!e!suffix hello\n");
     let tag = tokens.iter().find(|t| t.0 == TokenKind::Tag).unwrap();
     assert_eq!(tag.1, "!e!suffix");
 }
@@ -1165,4 +1165,159 @@ fn multi_line_double_quoted_scalar() {
 fn multi_line_single_quoted_scalar() {
     let tokens = scan("'hello\n  world'\n");
     assert_eq!(tokens[1].1, "hello world");
+}
+
+// -- fail:true rejection tests (YAML Test Suite compliance) --
+
+/// Helper: assert that scanning produces an error containing `msg`.
+fn assert_scan_error(input: &str, msg: &str) {
+    let results: Vec<_> = Scanner::new(input).collect();
+    assert!(
+        results
+            .iter()
+            .any(|r| { r.as_ref().is_err_and(|e| e.message.contains(msg)) }),
+        "expected scan error containing '{msg}' for input: {input:?}\ngot: {results:?}",
+    );
+}
+
+#[test]
+fn duplicate_yaml_directive_errors() {
+    // SF5V: duplicate %YAML in the same prologue.
+    assert_scan_error("%YAML 1.2\n%YAML 1.2\n---\n", "duplicate %YAML");
+}
+
+#[test]
+fn directive_only_stream_errors() {
+    // 9MMA: directive without a following document.
+    assert_scan_error("%YAML 1.2\n", "directives without a document");
+}
+
+#[test]
+fn directive_without_document_end_errors() {
+    // 9HCY: directive in open implicit document.
+    assert_scan_error(
+        "!foo \"bar\"\n%TAG ! tag:example.com,2000:app/\n---\n!foo \"bar\"\n",
+        "directive without document end marker",
+    );
+    // EB22: %YAML without preceding `...`. The comment terminates the plain
+    // scalar so %YAML reaches the directive check.
+    assert_scan_error(
+        "---\nscalar1 # comment\n%YAML 1.2\n---\nscalar2\n",
+        "directive without document end marker",
+    );
+    // RHX7: same pattern.
+    assert_scan_error(
+        "---\nkey: value\n%YAML 1.2\n---\n",
+        "directive without document end marker",
+    );
+}
+
+#[test]
+fn directive_after_document_end_is_valid() {
+    // Directives are allowed after `...` (back in prologue).
+    let tokens = scan("---\nvalue\n...\n%YAML 1.2\n---\nother\n");
+    assert!(tokens.iter().any(|t| t.0 == TokenKind::VersionDirective));
+}
+
+#[test]
+fn block_collection_on_document_start_line_errors() {
+    // 9KBC: mapping starting on --- line.
+    assert_scan_error("--- key1: value1\n    key2: value2\n", "block collection");
+    // CXX2: anchor + mapping on --- line.
+    assert_scan_error("--- &anchor a: b\n", "block collection");
+}
+
+#[test]
+fn scalar_on_document_start_line_is_valid() {
+    // `--- value` is valid (scalar on --- line, not a block collection).
+    let tokens = scan("--- value\n");
+    assert!(tokens.iter().any(|t| t.0 == TokenKind::Scalar));
+}
+
+#[test]
+fn flow_on_document_start_line_is_valid() {
+    // `--- [a, b]` is valid (flow collection on --- line).
+    let tokens = scan("--- [a, b]\n");
+    assert!(tokens.iter().any(|t| t.0 == TokenKind::FlowSequenceStart));
+}
+
+#[test]
+fn multiline_flow_key_in_block_errors() {
+    // C2SP: flow sequence as implicit key spanning lines.
+    assert_scan_error("[23\n]: 42\n", "multiline simple key");
+}
+
+#[test]
+fn single_line_flow_key_in_block_is_valid() {
+    // [a]: value — single-line flow collection as implicit key is fine.
+    let tokens = scan("[a]: value\n");
+    let kinds: Vec<_> = tokens.iter().map(|t| t.0).collect();
+    assert!(kinds.contains(&TokenKind::FlowSequenceStart));
+    assert!(kinds.contains(&TokenKind::Value));
+}
+
+#[test]
+fn undeclared_tag_handle_errors() {
+    // QLJ7: tag handle used but not declared in this document.
+    assert_scan_error(
+        "%TAG !prefix! tag:example.com,2011:\n--- !prefix!A\na: b\n--- !prefix!B\nc: d\n",
+        "undeclared tag handle",
+    );
+}
+
+#[test]
+fn declared_tag_handle_is_valid() {
+    // Handle declared in the same prologue works.
+    let tokens = scan("%TAG !p! tag:example.com,\n---\n!p!foo bar\n");
+    let tag = tokens.iter().find(|t| t.0 == TokenKind::Tag).unwrap();
+    assert_eq!(tag.1, "!p!foo");
+}
+
+#[test]
+fn primary_and_secondary_handles_always_valid() {
+    // `!suffix` and `!!suffix` don't need %TAG.
+    let tokens = scan("!foo bar\n");
+    assert!(tokens.iter().any(|t| t.0 == TokenKind::Tag));
+    let tokens = scan("!!str bar\n");
+    assert!(tokens.iter().any(|t| t.0 == TokenKind::Tag));
+}
+
+#[test]
+fn extra_content_after_root_scalar_errors() {
+    // BS4K: two scalars at root level.
+    assert_scan_error(
+        "word1  # comment\nword2\n",
+        "extra content after document root node",
+    );
+}
+
+#[test]
+fn extra_content_after_flow_collection_errors() {
+    // KS4U: content after flow sequence at root.
+    assert_scan_error(
+        "---\n[\nsequence item\n]\ninvalid item\n",
+        "extra content after document root node",
+    );
+}
+
+#[test]
+fn single_root_scalar_is_valid() {
+    // One scalar at root is fine.
+    let tokens = scan("hello\n");
+    assert!(tokens.iter().any(|t| t.0 == TokenKind::Scalar));
+}
+
+#[test]
+fn root_mapping_is_valid() {
+    // Mapping at root (enters block context at indent 0).
+    let tokens = scan("key: value\nkey2: value2\n");
+    assert!(tokens.iter().any(|t| t.0 == TokenKind::BlockMappingStart));
+}
+
+#[test]
+fn multi_document_root_nodes_valid() {
+    // Each document gets its own root node — no false positive.
+    let tokens = scan("scalar1\n---\nscalar2\n---\nscalar3\n");
+    let scalar_count = tokens.iter().filter(|t| t.0 == TokenKind::Scalar).count();
+    assert_eq!(scalar_count, 3);
 }

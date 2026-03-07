@@ -131,6 +131,21 @@ pub struct Scanner<'input> {
     /// multiline implicit keys (`:` in `[...]` vs `{...}`).
     // cref: fy_parser.flow (FYFT_MAP vs FYFT_SEQ)
     flow_is_mapping: Vec<bool>,
+    /// Whether we're in the directive prologue (stream start or after `...`).
+    /// Directives (`%YAML`, `%TAG`) are only valid here.
+    in_directive_prologue: bool,
+    /// Whether any directive was seen in the current prologue (for 9MMA check).
+    seen_directive: bool,
+    /// Whether `%YAML` was seen in the current prologue (for SF5V duplicate check).
+    seen_yaml_directive: bool,
+    /// Line of most recent `---` for same-line block collection rejection (9KBC, CXX2).
+    document_start_line: Option<u32>,
+    /// Root-level content already complete — standalone scalar or flow collection
+    /// at indent -1. Used to reject extra root content (BS4K, KS4U).
+    root_token_emitted: bool,
+    /// Named tag handles registered via `%TAG` in the current directive prologue.
+    /// Cleared on `...` and on `---` without a preceding prologue.
+    tag_handles: Vec<String>,
 }
 
 impl<'input> Scanner<'input> {
@@ -152,6 +167,12 @@ impl<'input> Scanner<'input> {
             last_block_token_line: None,
             flow_indent: -1,
             flow_is_mapping: Vec::new(),
+            in_directive_prologue: true,
+            seen_directive: false,
+            seen_yaml_directive: false,
+            document_start_line: None,
+            root_token_emitted: false,
+            tag_handles: Vec::new(),
             next_token_id: 0,
             tokens_consumed: 0,
         }
@@ -325,9 +346,22 @@ impl<'input> Scanner<'input> {
         if self.flow_level > 0 || column <= self.indent {
             return;
         }
+        // 9KBC, CXX2: block collections cannot start on the `---` line.
+        // YAML §7.3.2 requires s-l-comments (newline) before block collection entries.
+        let mark = self.reader.mark();
+        if self.document_start_line == Some(mark.line) {
+            self.error = Some(ScanError {
+                message: "block collection cannot start on the document start line".to_string(),
+            });
+            return;
+        }
+        // Entering block context from root clears root_token_emitted
+        // since the root IS this block collection (not yet complete).
+        if self.indent == -1 {
+            self.root_token_emitted = false;
+        }
         self.indent_stack.push(self.indent);
         self.indent = column;
-        let mark = self.reader.mark();
         let kind = if is_mapping {
             TokenKind::BlockMappingStart
         } else {
@@ -457,18 +491,37 @@ impl<'input> Scanner<'input> {
             }
         }
 
+        // BS4K: collect token IDs of root-level simple keys being purged.
+        // After retain, check if any was a Scalar or Alias — those are
+        // standalone root values. Tags and anchors are node properties
+        // that attach to the following node, so they don't count.
+        let indent = self.indent;
+        let flow_level = self.flow_level;
+        let mut purged_root_ids: Vec<u64> = Vec::new();
         self.simple_keys.retain(|sk| {
-            if self.flow_level == 0 {
+            if flow_level == 0 {
                 // Block context: keys must end on the current line.
                 // Use `end_line` so multiline tokens (quoted scalars,
                 // multiline plain scalars) survive until `:` on their
                 // last line triggers fetch_value's multiline check.
-                current_line <= sk.end_line
+                let keep = current_line <= sk.end_line;
+                if !keep && !sk.required && sk.flow_level == 0 && indent == -1 {
+                    purged_root_ids.push(sk.token_id);
+                }
+                keep
             } else {
                 // Flow context: keys must be at <= current flow level.
-                sk.flow_level <= self.flow_level
+                sk.flow_level <= flow_level
             }
         });
+        for id in purged_root_ids {
+            if let Some(pos) = self.queue_position(id) {
+                let kind = self.queue[pos].kind;
+                if matches!(kind, TokenKind::Scalar | TokenKind::Alias) {
+                    self.root_token_emitted = true;
+                }
+            }
+        }
     }
 
     /// Remove all simple keys at or above the current flow level.
@@ -512,11 +565,41 @@ impl<'input> Scanner<'input> {
     }
 
     /// Consume `---` or `...` and emit a document indicator token.
+    ///
+    /// Manages document-state tracking:
+    /// - `---`: enters document, resets directive state, records line for
+    ///   same-line block collection rejection (9KBC, CXX2).
+    /// - `...`: returns to directive prologue, clears tag handles.
     // cref: fy_fetch_document_indicator (fy-parse.c:2379)
     fn fetch_document_indicator(&mut self, kind: TokenKind) -> Token<'input> {
         let start = self.reader.mark();
         self.reader.advance_by(3);
         let end = self.reader.mark();
+
+        match kind {
+            TokenKind::DocumentStart => {
+                // Clear tag handles only if there was no directive prologue
+                // (e.g., second `---` without intervening `%TAG`).
+                if !self.in_directive_prologue {
+                    self.tag_handles.clear();
+                }
+                self.in_directive_prologue = false;
+                self.seen_directive = false;
+                self.seen_yaml_directive = false;
+                self.document_start_line = Some(start.line);
+                self.root_token_emitted = false;
+            }
+            TokenKind::DocumentEnd => {
+                self.in_directive_prologue = true;
+                self.seen_directive = false;
+                self.seen_yaml_directive = false;
+                self.document_start_line = None;
+                self.root_token_emitted = false;
+                self.tag_handles.clear();
+            }
+            _ => {}
+        }
+
         Self::marker_token(kind, start, end)
     }
 
@@ -543,6 +626,14 @@ impl<'input> Scanner<'input> {
     /// Scan `%YAML x.y`.
     // cref: fy_scan_directive (fy-parse.c:2275)
     fn fetch_version_directive(&mut self) -> Result<Token<'input>, ScanError> {
+        // SF5V: duplicate %YAML directive in the same prologue.
+        if self.seen_yaml_directive {
+            return Err(ScanError {
+                message: "duplicate %YAML directive".to_string(),
+            });
+        }
+        self.seen_yaml_directive = true;
+        self.seen_directive = true;
         self.reader.advance_by(4); // skip "YAML"
         self.skip_blanks();
         let ver_start = self.reader.mark();
@@ -593,6 +684,7 @@ impl<'input> Scanner<'input> {
     /// Scan `%TAG handle prefix`.
     // cref: fy_scan_directive (fy-parse.c:2296)
     fn fetch_tag_directive(&mut self) -> Result<Token<'input>, ScanError> {
+        self.seen_directive = true;
         self.reader.advance_by(3); // skip "TAG"
         self.skip_blanks();
         let data_start = self.reader.mark();
@@ -612,6 +704,10 @@ impl<'input> Scanner<'input> {
             }
             self.reader.advance();
         }
+        // QLJ7: register the tag handle for scope validation in fetch_tag.
+        let handle_end = self.reader.mark();
+        let handle = self.reader.slice(data_start.offset, handle_end.offset);
+        self.tag_handles.push(handle.to_string());
         self.skip_blanks();
         while let Some(c) = self.reader.peek() {
             if is_blank(Some(c)) || is_linebreak(c) {
@@ -689,11 +785,19 @@ impl<'input> Scanner<'input> {
         if self.flow_level > 0 {
             self.adjacent_value_offset = Some(self.reader.mark().offset);
         }
-        // When returning to block context, validate trailing content.
-        // `:` is allowed (e.g., `[a]: value`), as are whitespace and comments.
-        // Anything else (e.g., `{ y: z }- invalid`) is an error.
+        // When returning to block context, validate trailing content and
+        // update simple key tracking.
         // cref: fy_fetch_flow_collection_mark_end (fy-parse.c)
         if self.flow_level == 0 {
+            // C2SP: update the outer simple key's end_line to the flow
+            // collection's closing line. Without this, the multiline key
+            // check in fetch_value can't detect cross-line flow keys.
+            if let Some(sk) = self.simple_keys.last_mut().filter(|s| s.flow_level == 0) {
+                sk.end_line = end.line;
+            }
+
+            // `:` is allowed (e.g., `[a]: value`), as are whitespace and comments.
+            // Anything else (e.g., `{ y: z }- invalid`) is an error.
             let mut lookahead = 0;
             while self.reader.peek_at(lookahead) == Some(' ')
                 || self.reader.peek_at(lookahead) == Some('\t')
@@ -701,8 +805,20 @@ impl<'input> Scanner<'input> {
                 lookahead += 1;
             }
             match self.reader.peek_at(lookahead) {
-                None | Some('\n' | '\r' | ':') => {}
-                Some('#') if lookahead > 0 => {}
+                None | Some('\n' | '\r') => {
+                    // KS4U: flow collection at root with no `:` following —
+                    // root node is complete, reject further content.
+                    if self.indent == -1 {
+                        self.root_token_emitted = true;
+                    }
+                }
+                Some(':') => {}
+                Some('#') if lookahead > 0 => {
+                    // Comment after flow close at root — root is complete.
+                    if self.indent == -1 {
+                        self.root_token_emitted = true;
+                    }
+                }
                 Some(c) => {
                     self.error = Some(ScanError {
                         message: format!("invalid character '{c}' after flow collection close"),
@@ -845,10 +961,22 @@ impl<'input> Scanner<'input> {
                 if let Some(pos) = self.queue_position(sk.token_id) {
                     // In block context, push BlockMappingStart if indent warrants.
                     if self.flow_level == 0 && sk.mark.column as i32 > self.indent {
+                        // 9KBC, CXX2: block collections cannot start on the `---` line.
+                        if self.document_start_line == Some(sk.mark.line) {
+                            self.error = Some(ScanError {
+                                message: "block collection cannot start on the document start line"
+                                    .to_string(),
+                            });
+                            return;
+                        }
                         let bms =
                             Self::marker_token(TokenKind::BlockMappingStart, sk.mark, sk.mark);
                         self.queue.insert(pos, bms);
                         self.next_token_id += 1;
+                        // Entering block context from root clears root_token_emitted.
+                        if self.indent == -1 {
+                            self.root_token_emitted = false;
+                        }
                         self.indent_stack.push(self.indent);
                         self.indent = sk.mark.column as i32;
                         // Key goes after BlockMappingStart, before the key token.
@@ -1211,6 +1339,24 @@ impl<'input> Scanner<'input> {
         }
 
         let tag_raw = self.reader.slice(start_mark.offset, end_mark.offset);
+
+        // QLJ7: validate named tag handles are declared via %TAG in this document.
+        // Primary `!` and secondary `!!` are always valid; named `!name!` must
+        // be explicitly declared. Verbatim `!<uri>` bypasses handle resolution.
+        if tag_raw.len() > 1 && !tag_raw.starts_with("!<") {
+            // Find the handle portion: everything up to and including the
+            // second `!` (if present). E.g., `!prefix!A` → handle `!prefix!`.
+            if let Some(second_bang) = tag_raw[1..].find('!') {
+                let handle = &tag_raw[..second_bang + 2]; // includes both `!`
+                if handle != "!!" && !self.tag_handles.iter().any(|h| h == handle) {
+                    self.error = Some(ScanError {
+                        message: format!("undeclared tag handle '{handle}'"),
+                    });
+                    return;
+                }
+            }
+        }
+
         // Decode URI percent-encoding in tag suffix (YAML §6.9.1).
         // E.g., `!e!tag%21` → `!e!tag!`.
         let tag_data: Cow<'input, str> = if tag_raw.contains('%') {
@@ -2022,6 +2168,13 @@ impl<'input> Scanner<'input> {
             self.purge_stale_simple_keys();
 
             if self.reader.is_eof() {
+                // 9MMA: directive-only stream — directives without a following document.
+                if self.seen_directive && self.in_directive_prologue {
+                    self.error = Some(ScanError {
+                        message: "directives without a document".to_string(),
+                    });
+                    continue;
+                }
                 // All pending simple keys are unreachable at EOF.
                 self.simple_keys.clear();
                 self.unroll_indent(-1);
@@ -2064,6 +2217,14 @@ impl<'input> Scanner<'input> {
                     continue;
                 }
                 if c == '%' {
+                    // 9HCY, EB22, RHX7: directives require `...` first if a
+                    // document is open (explicit via `---` or implicit content).
+                    if !self.in_directive_prologue {
+                        self.error = Some(ScanError {
+                            message: "directive without document end marker '...'".to_string(),
+                        });
+                        continue;
+                    }
                     // Directives end any open block context.
                     self.remove_simple_key();
                     self.unroll_indent(-1);
@@ -2083,6 +2244,25 @@ impl<'input> Scanner<'input> {
                         }
                     }
                 }
+            }
+
+            // Any content beyond this point implicitly starts a document.
+            // Clear tag handles for implicit documents (no directive prologue).
+            if self.in_directive_prologue {
+                self.in_directive_prologue = false;
+                // Implicit document has no %TAG directives — clear handles.
+                // (Explicit documents keep handles registered before `---`.)
+                self.tag_handles.clear();
+            }
+
+            // BS4K, KS4U: at root level (indent -1, flow_level 0), only one
+            // root node is allowed per document. After a standalone scalar or
+            // flow collection, reject further content.
+            if self.root_token_emitted && self.indent == -1 && self.flow_level == 0 {
+                self.error = Some(ScanError {
+                    message: "extra content after document root node".to_string(),
+                });
+                continue;
             }
 
             // Flow collection indicators.

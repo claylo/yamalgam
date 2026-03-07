@@ -16,6 +16,7 @@
 //! - [`run_c_events`] / [`run_rust_parser`]: harness functions for each implementation
 //! - [`compare_events`]: end-to-end event comparison of raw YAML input
 
+pub mod c_baseline;
 pub mod compare;
 pub mod event_snapshot;
 pub mod harness;
@@ -26,6 +27,7 @@ pub use compare::{
 };
 pub use event_snapshot::EventSnapshot;
 pub use harness::{
-    compare_events, compare_input, run_c_events, run_c_tokenizer, run_rust_parser, run_rust_scanner,
+    compare_events, compare_events_cached, compare_input, compare_input_cached, run_c_events,
+    run_c_tokenizer, run_rust_parser, run_rust_scanner,
 };
 pub use snapshot::{SpanSnapshot, TokenSnapshot};
