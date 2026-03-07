@@ -75,13 +75,31 @@ fn extract_yaml_input(content: &str) -> Option<String> {
 
     // The YAML Test Suite uses visual markers for significant whitespace:
     // - ␣ (U+2423, OPEN BOX) → space (trailing/significant whitespace)
+    // - — (U+2014, EM DASH) → tab filler (visual padding before »), strip
     // - » (U+00BB, RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK) → tab
+    // - ↵ (U+21B5, DOWNWARDS ARROW WITH CORNER LEFTWARDS) → newline already
+    //   present from block scalar line break, strip the marker
+    // - ∎ (U+220E, END OF PROOF) → no final newline, strip trailing newline
     // Convert to actual characters before feeding to scanners.
+    if result.contains('\u{2014}') {
+        result = result.replace('\u{2014}', "");
+    }
     if result.contains('\u{2423}') {
         result = result.replace('\u{2423}', " ");
     }
     if result.contains('\u{00BB}') {
         result = result.replace('\u{00BB}', "\t");
+    }
+    if result.contains('\u{21B5}') {
+        result = result.replace('\u{21B5}', "");
+    }
+    if result.contains('\u{220E}') {
+        result = result.replace('\u{220E}', "");
+        // ∎ means "no final newline" — strip the trailing newline that
+        // the block scalar extraction added.
+        if result.ends_with('\n') {
+            result.pop();
+        }
     }
 
     Some(result)
