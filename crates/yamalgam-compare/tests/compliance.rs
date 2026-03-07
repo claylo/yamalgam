@@ -128,11 +128,13 @@ fn compliance_test(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         CompareResult::BothErrorMismatch {
-            c_error,
-            rust_error,
+            c_error: _,
+            rust_error: _,
         } => {
+            // Both implementations rejected the input — this is a pass
+            // regardless of differing error messages.
             eprintln!(
-                "MISMATCH: {} (C: {c_error}, Rust: {rust_error})",
+                "PASS: {} (both errored)",
                 path.file_stem().unwrap().to_string_lossy()
             );
         }

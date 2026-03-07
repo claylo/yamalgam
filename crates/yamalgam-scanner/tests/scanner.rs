@@ -891,6 +891,36 @@ fn tag_uri_percent_decoding() {
     assert_eq!(tag.1, "!e!tag!");
 }
 
+#[test]
+fn unterminated_double_quoted_scalar_errors() {
+    let scanner = Scanner::new("key: \"missing close\n");
+    let results: Vec<_> = scanner.collect();
+    assert!(results.iter().any(|r| r.is_err()), "expected scan error");
+}
+
+#[test]
+fn unterminated_single_quoted_scalar_errors() {
+    let scanner = Scanner::new("key: 'missing close\n");
+    let results: Vec<_> = scanner.collect();
+    assert!(results.iter().any(|r| r.is_err()), "expected scan error");
+}
+
+#[test]
+fn invalid_escape_sequence_errors() {
+    // `\.` is not a valid YAML escape (55WF).
+    let scanner = Scanner::new("\"\\.\"\n");
+    let results: Vec<_> = scanner.collect();
+    assert!(results.iter().any(|r| r.is_err()), "expected scan error");
+}
+
+#[test]
+fn invalid_single_quote_escape_in_double_quoted_errors() {
+    // `\'` is not valid in double-quoted scalars (HRE5).
+    let scanner = Scanner::new("\"quoted \\' scalar\"\n");
+    let results: Vec<_> = scanner.collect();
+    assert!(results.iter().any(|r| r.is_err()), "expected scan error");
+}
+
 // === Anchors and aliases ===
 
 #[test]
