@@ -575,53 +575,66 @@ impl<'input> Scanner<'input> {
     fn fetch_value(&mut self) {
         self.purge_stale_simple_keys();
 
-        // Pop the simple key at the current flow level (if any).
-        let sk = self
-            .simple_keys
-            .last()
-            .filter(|s| s.flow_level == self.flow_level)
-            .cloned();
-        if sk.is_some() {
-            self.simple_keys.pop();
-        }
+        // Check for explicit key resolution first (`? key : value`).
+        // The `?` already emitted Key — we just need Value.
+        let mark = self.reader.mark();
+        let col = mark.column as i32;
+        let is_explicit_key_value = self.pending_complex_key_column >= 0
+            && (self.flow_level > 0 || col <= self.pending_complex_key_column);
 
-        if let Some(sk) = sk {
-            // We have a pending simple key — insert Key (and BlockMappingStart)
-            // before the key token in the queue.
-            if let Some(pos) = self.queue_position(sk.token_id) {
-                // In block context, push BlockMappingStart if indent warrants.
-                if self.flow_level == 0 && sk.mark.column as i32 > self.indent {
-                    let bms = Self::marker_token(TokenKind::BlockMappingStart, sk.mark, sk.mark);
-                    self.queue.insert(pos, bms);
-                    self.next_token_id += 1;
-                    self.indent_stack.push(self.indent);
-                    self.indent = sk.mark.column as i32;
-                    // Key goes after BlockMappingStart, before the key token.
-                    let key = Self::marker_token(TokenKind::Key, sk.mark, sk.mark);
-                    self.queue.insert(pos + 1, key);
-                } else {
-                    let key = Self::marker_token(TokenKind::Key, sk.mark, sk.mark);
-                    self.queue.insert(pos, key);
-                }
-                self.next_token_id += 1;
+        if is_explicit_key_value {
+            self.pending_complex_key_column = -1;
+            // Discard any simple key from the explicit key's content.
+            if self
+                .simple_keys
+                .last()
+                .is_some_and(|s| s.flow_level == self.flow_level)
+            {
+                self.simple_keys.pop();
             }
-            self.simple_key_allowed = false;
-        } else {
-            // No simple key. Check if this is the value for an explicit
-            // key (`? key\n: value`) or a bare empty key (`: value`).
-            let mark = self.reader.mark();
-            let col = mark.column as i32;
-            let is_explicit_key_value =
-                self.pending_complex_key_column >= 0 && col <= self.pending_complex_key_column;
-            if is_explicit_key_value {
-                // Explicit key already emitted Key — just emit Value.
-                self.pending_complex_key_column = -1;
-            } else if self.flow_level == 0 {
-                // Bare empty key — emit BlockMappingStart + Key.
-                self.roll_indent(col, true);
-                self.enqueue(Self::marker_token(TokenKind::Key, mark, mark));
-            }
+            // In block context, the value content can start a new mapping.
             self.simple_key_allowed = self.flow_level == 0;
+        } else {
+            // Pop the simple key at the current flow level (if any).
+            let sk = self
+                .simple_keys
+                .last()
+                .filter(|s| s.flow_level == self.flow_level)
+                .cloned();
+            if sk.is_some() {
+                self.simple_keys.pop();
+            }
+
+            if let Some(sk) = sk {
+                // We have a pending simple key — insert Key (and BlockMappingStart)
+                // before the key token in the queue.
+                if let Some(pos) = self.queue_position(sk.token_id) {
+                    // In block context, push BlockMappingStart if indent warrants.
+                    if self.flow_level == 0 && sk.mark.column as i32 > self.indent {
+                        let bms =
+                            Self::marker_token(TokenKind::BlockMappingStart, sk.mark, sk.mark);
+                        self.queue.insert(pos, bms);
+                        self.next_token_id += 1;
+                        self.indent_stack.push(self.indent);
+                        self.indent = sk.mark.column as i32;
+                        // Key goes after BlockMappingStart, before the key token.
+                        let key = Self::marker_token(TokenKind::Key, sk.mark, sk.mark);
+                        self.queue.insert(pos + 1, key);
+                    } else {
+                        let key = Self::marker_token(TokenKind::Key, sk.mark, sk.mark);
+                        self.queue.insert(pos, key);
+                    }
+                    self.next_token_id += 1;
+                }
+                self.simple_key_allowed = false;
+            } else {
+                // No simple key — bare empty key (`: value`).
+                if self.flow_level == 0 {
+                    self.roll_indent(col, true);
+                    self.enqueue(Self::marker_token(TokenKind::Key, mark, mark));
+                }
+                self.simple_key_allowed = self.flow_level == 0;
+            }
         }
 
         let start = self.reader.mark();
@@ -734,6 +747,13 @@ impl<'input> Scanner<'input> {
                 break;
             }
 
+            // Scan the continuation line before adding fold separator,
+            // in case a terminator stops it immediately (empty result).
+            let line = self.scan_plain_scalar_line();
+            if line.is_empty() {
+                break;
+            }
+
             // We have a continuation line with content.
             if empty_lines > 0 {
                 for _ in 0..empty_lines {
@@ -744,7 +764,6 @@ impl<'input> Scanner<'input> {
                 result.push(' ');
             }
 
-            let line = self.scan_plain_scalar_line();
             result.push_str(line);
         }
 
@@ -784,6 +803,10 @@ impl<'input> Scanner<'input> {
                         && self.reader.peek_at(i + 1) == Some(c)
                         && self.reader.peek_at(i + 2) == Some(c)
                     {
+                        return false;
+                    }
+                    // Flow indicators end the scalar in flow context.
+                    if self.flow_level > 0 && matches!(c, ',' | '[' | ']' | '{' | '}') {
                         return false;
                     }
                     return col >= min_indent;
@@ -1519,17 +1542,18 @@ impl<'input> Scanner<'input> {
                 continue;
             }
 
-            // Block indicators (not in flow context).
-            // cref: fy_fetch_tokens (fy-parse.c:5396-5441)
-            if self.flow_level == 0 {
-                if c == '-' && is_blank_or_end(self.reader.peek_at(1)) {
-                    self.fetch_block_entry();
-                    continue;
-                }
-                if c == '?' && is_blank_or_end(self.reader.peek_at(1)) {
-                    self.fetch_key();
-                    continue;
-                }
+            // Block entry (`-`) is only valid in block context.
+            // cref: fy_fetch_tokens (fy-parse.c:5396)
+            if self.flow_level == 0 && c == '-' && is_blank_or_end(self.reader.peek_at(1)) {
+                self.fetch_block_entry();
+                continue;
+            }
+
+            // Explicit key (`?`) is valid in both block and flow context.
+            // cref: fy_fetch_tokens (fy-parse.c:5410)
+            if c == '?' && is_blank_or_end(self.reader.peek_at(1)) {
+                self.fetch_key();
+                continue;
             }
 
             // Value indicator `:` — in both block and flow context.
