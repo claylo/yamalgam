@@ -942,3 +942,54 @@ fn tag_in_sequence() {
             .any(|t| t.0 == TokenKind::Scalar && t.1 == "42")
     );
 }
+
+// === Edge cases ===
+
+#[test]
+fn flow_mapping_simple_key_resolution() {
+    // In flow context, scalars followed by `: ` should produce Key.
+    let tokens = scan("{a: 1, b: 2}\n");
+    let k: Vec<_> = tokens.iter().map(|t| t.0).collect();
+    assert_eq!(
+        k,
+        vec![
+            TokenKind::StreamStart,
+            TokenKind::FlowMappingStart,
+            TokenKind::Key,
+            TokenKind::Scalar,
+            TokenKind::Value,
+            TokenKind::Scalar,
+            TokenKind::FlowEntry,
+            TokenKind::Key,
+            TokenKind::Scalar,
+            TokenKind::Value,
+            TokenKind::Scalar,
+            TokenKind::FlowMappingEnd,
+            TokenKind::StreamEnd,
+        ]
+    );
+}
+
+#[test]
+fn flow_mapping_quoted_key() {
+    let tokens = scan("{\"key\": val}\n");
+    assert!(tokens.iter().any(|t| t.0 == TokenKind::Key));
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.0 == TokenKind::Scalar && t.1 == "key")
+    );
+}
+
+#[test]
+fn multi_line_double_quoted_scalar() {
+    // Newline in double-quoted scalar is folded to space.
+    let tokens = scan("\"hello\n  world\"\n");
+    assert_eq!(tokens[1].1, "hello world");
+}
+
+#[test]
+fn multi_line_single_quoted_scalar() {
+    let tokens = scan("'hello\n  world'\n");
+    assert_eq!(tokens[1].1, "hello world");
+}

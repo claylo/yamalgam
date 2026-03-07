@@ -473,9 +473,8 @@ impl<'input> Scanner<'input> {
         }
 
         // Simple key resolution: if `:` + blank follows, this scalar is a key.
-        let is_key = self.flow_level == 0
-            && self.reader.peek() == Some(':')
-            && is_blank_or_end(self.reader.peek_at(1));
+        // Works in both block and flow context.
+        let is_key = self.reader.peek() == Some(':') && is_blank_or_end(self.reader.peek_at(1));
 
         if is_key {
             let col = start_mark.column as i32;
@@ -767,6 +766,15 @@ impl<'input> Scanner<'input> {
                         break;
                     }
                 }
+                // Newline inside single-quoted scalar: fold to space.
+                Some('\n' | '\r') => {
+                    needs_owned = true;
+                    self.reader.advance();
+                    while matches!(self.reader.peek(), Some(' ' | '\t')) {
+                        self.reader.advance();
+                    }
+                    result.push(' ');
+                }
                 Some(c) => {
                     result.push(c);
                     self.reader.advance();
@@ -908,6 +916,17 @@ impl<'input> Scanner<'input> {
                         }
                     }
                 }
+                // Newline inside double-quoted scalar: fold to space.
+                // Leading whitespace on the continuation line is trimmed.
+                Some('\n' | '\r') => {
+                    needs_owned = true;
+                    self.reader.advance(); // consume newline
+                    // Trim leading whitespace on next line.
+                    while matches!(self.reader.peek(), Some(' ' | '\t')) {
+                        self.reader.advance();
+                    }
+                    result.push(' ');
+                }
                 Some(c) => {
                     result.push(c);
                     self.reader.advance();
@@ -916,6 +935,7 @@ impl<'input> Scanner<'input> {
         }
 
         let end_mark = self.reader.mark();
+        // Multi-line always needs owned due to folding.
         let data = if needs_owned {
             Cow::Owned(result)
         } else {
@@ -952,9 +972,8 @@ impl<'input> Scanner<'input> {
         end_mark: yamalgam_core::Mark,
     ) {
         // Simple key resolution: if `:` + blank follows, this is a key.
-        let is_key = self.reader.peek() == Some(':')
-            && is_blank_or_end(self.reader.peek_at(1))
-            && self.flow_level == 0;
+        // Works in both block and flow context.
+        let is_key = self.reader.peek() == Some(':') && is_blank_or_end(self.reader.peek_at(1));
 
         if is_key {
             let col = start_mark.column as i32;
@@ -1092,10 +1111,13 @@ impl<'input> Scanner<'input> {
                     self.fetch_key();
                     continue;
                 }
-                if c == ':' && is_blank_or_end(self.reader.peek_at(1)) {
-                    self.fetch_value();
-                    continue;
-                }
+            }
+
+            // Value indicator `:` — in both block and flow context.
+            // cref: fy_fetch_tokens (fy-parse.c:5426)
+            if c == ':' && is_blank_or_end(self.reader.peek_at(1)) {
+                self.fetch_value();
+                continue;
             }
 
             // Tags.
