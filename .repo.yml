@@ -45,7 +45,7 @@ license:
 lint_level: strict
 msrv: 1.88.0
 owner: claylo
-pinned_dev_toolchain: 1.93.1
+pinned_dev_toolchain: 1.94.0
 preset: standard
 project_description: A modern, production-ready Rust CLI application.
 project_name: yamalgam
