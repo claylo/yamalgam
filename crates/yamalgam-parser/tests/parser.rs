@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use pretty_assertions::assert_eq;
-use yamalgam_parser::{Event, Parser};
+use yamalgam_parser::{CollectionStyle, Event, Parser, ScalarStyle};
 
 #[test]
 fn empty_stream() {
@@ -210,4 +210,277 @@ fn document_end_then_new_document() {
             ..
         }
     ));
+}
+
+// -- Scalar with anchor/tag tests --
+
+#[test]
+fn plain_scalar() {
+    let events: Vec<_> = Parser::new("hello")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::Scalar {
+        ref value,
+        style,
+        ref anchor,
+        ref tag,
+        ..
+    } = events[2]
+    {
+        assert_eq!(value.as_ref(), "hello");
+        assert_eq!(style, ScalarStyle::Plain);
+        assert!(anchor.is_none());
+        assert!(tag.is_none());
+    } else {
+        panic!("expected Scalar, got {:?}", events[2]);
+    }
+}
+
+#[test]
+fn anchored_scalar() {
+    let events: Vec<_> = Parser::new("&foo hello")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::Scalar {
+        ref anchor,
+        ref value,
+        ..
+    } = events[2]
+    {
+        assert_eq!(anchor.as_deref(), Some("foo"));
+        assert_eq!(value.as_ref(), "hello");
+    } else {
+        panic!("expected Scalar, got {:?}", events[2]);
+    }
+}
+
+#[test]
+fn tagged_scalar() {
+    let events: Vec<_> = Parser::new("!!str hello")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::Scalar {
+        ref tag,
+        ref value,
+        ..
+    } = events[2]
+    {
+        assert_eq!(tag.as_deref(), Some("!!str"));
+        assert_eq!(value.as_ref(), "hello");
+    } else {
+        panic!("expected Scalar, got {:?}", events[2]);
+    }
+}
+
+#[test]
+fn anchor_and_tag_on_scalar() {
+    let events: Vec<_> = Parser::new("&a !!str hello")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::Scalar {
+        ref anchor,
+        ref tag,
+        ref value,
+        ..
+    } = events[2]
+    {
+        assert_eq!(anchor.as_deref(), Some("a"));
+        assert_eq!(tag.as_deref(), Some("!!str"));
+        assert_eq!(value.as_ref(), "hello");
+    } else {
+        panic!("expected Scalar, got {:?}", events[2]);
+    }
+}
+
+#[test]
+fn tag_before_anchor_on_scalar() {
+    let events: Vec<_> = Parser::new("!!str &a hello")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::Scalar {
+        ref anchor,
+        ref tag,
+        ref value,
+        ..
+    } = events[2]
+    {
+        assert_eq!(anchor.as_deref(), Some("a"));
+        assert_eq!(tag.as_deref(), Some("!!str"));
+        assert_eq!(value.as_ref(), "hello");
+    } else {
+        panic!("expected Scalar, got {:?}", events[2]);
+    }
+}
+
+#[test]
+fn quoted_scalar_styles() {
+    let single = Parser::new("'hello'")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let double = Parser::new("\"hello\"")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(matches!(
+        single[2],
+        Event::Scalar {
+            style: ScalarStyle::SingleQuoted,
+            ..
+        }
+    ));
+    assert!(matches!(
+        double[2],
+        Event::Scalar {
+            style: ScalarStyle::DoubleQuoted,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn block_scalar_literal() {
+    let events: Vec<_> = Parser::new("|\n  hello\n  world")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::Scalar { style, .. } = events[2] {
+        assert_eq!(style, ScalarStyle::Literal);
+    } else {
+        panic!("expected Scalar");
+    }
+}
+
+#[test]
+fn block_scalar_folded() {
+    let events: Vec<_> = Parser::new(">\n  hello\n  world")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::Scalar { style, .. } = events[2] {
+        assert_eq!(style, ScalarStyle::Folded);
+    } else {
+        panic!("expected Scalar");
+    }
+}
+
+// -- Alias tests --
+
+#[test]
+fn alias_event() {
+    let events: Vec<_> = Parser::new("- &anchor hello\n- *anchor")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let alias = events.iter().find(|e| matches!(e, Event::Alias { .. }));
+    assert!(alias.is_some(), "expected Alias event in {:?}", events);
+    if let Some(Event::Alias { name, .. }) = alias {
+        assert_eq!(name.as_ref(), "anchor");
+    }
+}
+
+// -- Block sequence tests --
+
+#[test]
+fn block_sequence() {
+    let events: Vec<_> = Parser::new("- a\n- b\n- c")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(matches!(
+        events[2],
+        Event::SequenceStart {
+            style: CollectionStyle::Block,
+            ..
+        }
+    ));
+    let scalars: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let Event::Scalar { value, .. } = e {
+                Some(value.as_ref())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(scalars, vec!["a", "b", "c"]);
+    assert!(matches!(events[6], Event::SequenceEnd { .. }));
+}
+
+#[test]
+fn nested_block_sequence() {
+    let events: Vec<_> = Parser::new("- - a\n  - b\n- c")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let seq_starts = events
+        .iter()
+        .filter(|e| matches!(e, Event::SequenceStart { .. }))
+        .count();
+    assert_eq!(seq_starts, 2);
+}
+
+#[test]
+fn anchored_sequence() {
+    let events: Vec<_> = Parser::new("&seq\n- a\n- b")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::SequenceStart { ref anchor, .. } = events[2] {
+        assert_eq!(anchor.as_deref(), Some("seq"));
+    } else {
+        panic!("expected SequenceStart, got {:?}", events[2]);
+    }
+}
+
+#[test]
+fn empty_block_sequence_entries() {
+    let events: Vec<_> = Parser::new("-\n- a\n-")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let scalars: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let Event::Scalar { value, .. } = e {
+                Some(value.as_ref())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(scalars, vec!["", "a", ""]);
+}
+
+#[test]
+fn tagged_sequence() {
+    let events: Vec<_> = Parser::new("!!seq\n- a")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::SequenceStart { ref tag, .. } = events[2] {
+        assert_eq!(tag.as_deref(), Some("!!seq"));
+    } else {
+        panic!("expected SequenceStart, got {:?}", events[2]);
+    }
+}
+
+#[test]
+fn anchor_only_empty_scalar() {
+    // Anchor with no content following (document ends) — should emit empty scalar.
+    let events: Vec<_> = Parser::new("---\n&a")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if let Event::Scalar {
+        ref anchor,
+        ref value,
+        ..
+    } = events[2]
+    {
+        assert_eq!(anchor.as_deref(), Some("a"));
+        assert_eq!(value.as_ref(), "");
+    } else {
+        panic!("expected Scalar, got {:?}", events[2]);
+    }
+}
+
+#[test]
+fn sequence_event_count() {
+    // "- a\n- b" should produce:
+    // StreamStart, DocStart(i), SeqStart, Scalar(a), Scalar(b), SeqEnd, DocEnd(i), StreamEnd
+    let events: Vec<_> = Parser::new("- a\n- b")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(events.len(), 8);
 }
