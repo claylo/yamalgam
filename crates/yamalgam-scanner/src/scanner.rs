@@ -57,6 +57,9 @@ impl std::error::Error for ScanError {}
 struct SimpleKey {
     /// Position where the potential key token starts.
     mark: yamalgam_core::Mark,
+    /// Line where the potential key token ends.
+    /// Used for staleness checks on multiline tokens.
+    end_line: u32,
     /// Monotonic ID of the token in the queue (for locating it later).
     token_id: u64,
     /// Flow nesting level when this key was saved.
@@ -222,13 +225,35 @@ impl<'input> Scanner<'input> {
     /// In block context, crossing a newline re-enables simple keys.
     // cref: fy_scan_to_next_token (fy-parse.c:1260)
     fn scan_to_next_token(&mut self) {
+        let mut at_line_start = self.reader.mark().column == 0;
         loop {
             while let Some(c) = self.reader.peek() {
-                if c == ' ' || c == '\t' {
+                if c == ' ' {
+                    self.reader.advance();
+                } else if c == '\t' {
+                    // YAML §6.1: tabs must not be used for indentation.
+                    // In block context, tabs at the start of a line (before
+                    // any non-whitespace) are indentation — reject them.
+                    // Only when there's an active block structure (indent >= 0),
+                    // so tabs before the first block token (like `\t[`) are fine.
+                    // cref: fy_scan_to_next_token (fy-parse.c)
+                    if at_line_start && self.flow_level == 0 && self.indent >= 0 {
+                        self.error = Some(ScanError {
+                            message: "tab character used for indentation".to_string(),
+                        });
+                        return;
+                    }
                     self.reader.advance();
                 } else {
                     break;
                 }
+            }
+
+            // Content found — no longer at line start for tab checks.
+            // (Set before comment/newline check; overwritten by newline branch.)
+            #[allow(unused_assignments)]
+            {
+                at_line_start = false;
             }
 
             // `#` starts a comment only when preceded by whitespace or at
@@ -247,6 +272,7 @@ impl<'input> Scanner<'input> {
             match self.reader.peek() {
                 Some('\n' | '\r') => {
                     self.reader.advance();
+                    at_line_start = true;
                     // In block context, a newline allows a new simple key.
                     // cref: fy_scan_to_next_token (fy-parse.c:1312)
                     if self.flow_level == 0 {
@@ -311,7 +337,7 @@ impl<'input> Scanner<'input> {
     /// when `:` is encountered later.
     // cref: fy_save_simple_key (fy-parse.c:1698)
     fn save_simple_key(&mut self, token_id: u64, mark: yamalgam_core::Mark) {
-        self.save_simple_key_ext(token_id, mark, false);
+        self.save_simple_key_full(token_id, mark, mark.line, false);
     }
 
     /// Save a simple key with explicit JSON-like flag.
@@ -320,6 +346,17 @@ impl<'input> Scanner<'input> {
     /// starts — nodes where `:` is a value indicator regardless of what
     /// follows (YAML §7.4.2, production [153]).
     fn save_simple_key_ext(&mut self, token_id: u64, mark: yamalgam_core::Mark, json_key: bool) {
+        let end_line = self.reader.mark().line;
+        self.save_simple_key_full(token_id, mark, end_line, json_key);
+    }
+
+    fn save_simple_key_full(
+        &mut self,
+        token_id: u64,
+        mark: yamalgam_core::Mark,
+        end_line: u32,
+        json_key: bool,
+    ) {
         if !self.simple_key_allowed {
             return;
         }
@@ -331,6 +368,7 @@ impl<'input> Scanner<'input> {
 
         let sk = SimpleKey {
             mark,
+            end_line,
             token_id,
             flow_level: self.flow_level,
             required,
@@ -361,8 +399,11 @@ impl<'input> Scanner<'input> {
         let current_line = self.reader.mark().line;
         self.simple_keys.retain(|sk| {
             if self.flow_level == 0 {
-                // Block context: keys must be on the same line.
-                current_line <= sk.mark.line
+                // Block context: keys must end on the current line.
+                // Use `end_line` so multiline tokens (quoted scalars,
+                // multiline plain scalars) survive until `:` on their
+                // last line triggers fetch_value's multiline check.
+                current_line <= sk.end_line
             } else {
                 // Flow context: keys must be at <= current flow level.
                 sk.flow_level <= self.flow_level
@@ -582,6 +623,27 @@ impl<'input> Scanner<'input> {
         if self.flow_level > 0 {
             self.adjacent_value_offset = Some(self.reader.mark().offset);
         }
+        // When returning to block context, validate trailing content.
+        // `:` is allowed (e.g., `[a]: value`), as are whitespace and comments.
+        // Anything else (e.g., `{ y: z }- invalid`) is an error.
+        // cref: fy_fetch_flow_collection_mark_end (fy-parse.c)
+        if self.flow_level == 0 {
+            let mut lookahead = 0;
+            while self.reader.peek_at(lookahead) == Some(' ')
+                || self.reader.peek_at(lookahead) == Some('\t')
+            {
+                lookahead += 1;
+            }
+            match self.reader.peek_at(lookahead) {
+                None | Some('\n' | '\r' | ':') => {}
+                Some('#') if lookahead > 0 => {}
+                Some(c) => {
+                    self.error = Some(ScanError {
+                        message: format!("invalid character '{c}' after flow collection close"),
+                    });
+                }
+            }
+        }
     }
 
     /// Consume `,` and emit a flow entry token.
@@ -665,6 +727,33 @@ impl<'input> Scanner<'input> {
             }
 
             if let Some(sk) = sk {
+                // YAML §7.4.2: implicit keys are restricted to a single line.
+                // The key token must start and end on the same line. For
+                // json_key tokens (quoted scalars, flow collections), `:` may
+                // appear on a subsequent line (e.g., `{ "foo" # comment\n :bar }`)
+                // as long as the key itself is single-line.
+                // cref: fy_fetch_value (fy-parse.c)
+                // Multiline simple key restrictions:
+                // - Block context: multiline keys are never allowed.
+                // - Flow context: plain keys cannot have `:` on a different
+                //   line. json_key keys (quoted/flow) CAN span lines.
+                let key_is_multiline = sk.end_line > sk.mark.line;
+                let reject = if self.flow_level == 0 {
+                    // Block: reject any multiline key or cross-line non-json key.
+                    key_is_multiline || (sk.mark.line != mark.line && !sk.json_key)
+                } else {
+                    // Flow: reject when `:` is on a different line than the
+                    // key END (not start). Plain keys can fold across lines
+                    // but `:` must be on the key's last line.
+                    sk.end_line != mark.line && !sk.json_key
+                };
+                if reject {
+                    self.error = Some(ScanError {
+                        message: "multiline simple key is not allowed".to_string(),
+                    });
+                    return;
+                }
+
                 // We have a pending simple key — insert Key (and BlockMappingStart)
                 // before the key token in the queue.
                 if let Some(pos) = self.queue_position(sk.token_id) {
@@ -717,13 +806,28 @@ impl<'input> Scanner<'input> {
     /// - `,` `[` `]` `{` `}` in flow context
     /// - `---` or `...` at column 0 followed by blank/EOF (document indicators)
     // cref: fy_reader_fetch_plain_scalar_handle (fy-reader.c)
-    fn scan_plain_scalar_line(&mut self) -> &'input str {
+    fn scan_plain_scalar_line(&mut self, is_first_line: bool) -> &'input str {
         let start_offset = self.reader.mark().offset;
 
         // YAML §7.3.3 ns-plain-first: `#` cannot start a plain scalar.
         // Other c-indicators (`&`, `*`, `!`, etc.) are handled by dedicated
         // fetch methods before reaching the plain scalar fallback.
         if self.reader.peek() == Some('#') {
+            return self.reader.slice(start_offset, start_offset);
+        }
+
+        // YAML §7.3.3 ns-plain-first (first line only): `-`, `?`, `:` can
+        // start a plain scalar only when followed by ns-plain-safe. In flow
+        // context, flow indicators and blank/EOF are not ns-plain-safe, so
+        // bare `-`, `?`, `:` are invalid. On continuation lines, these are
+        // just regular ns-plain-char content.
+        // cref: YAML 1.2 §7.3.3 [126] ns-plain-first
+        if is_first_line
+            && matches!(self.reader.peek(), Some('-' | '?' | ':'))
+            && (is_blank_or_end(self.reader.peek_at(1))
+                || (self.flow_level > 0
+                    && matches!(self.reader.peek_at(1), Some(',' | '[' | ']' | '{' | '}'))))
+        {
             return self.reader.slice(start_offset, start_offset);
         }
 
@@ -759,13 +863,18 @@ impl<'input> Scanner<'input> {
     ///
     /// After the first line, continuation lines must be indented past the
     /// current block indent level. Line folding follows YAML 1.2 §7.3.3:
-    /// - Single newline between content lines → space
-    /// - Empty lines (only whitespace) → literal newline
+    /// single newline between content lines becomes space, empty lines
+    /// (only whitespace) become literal newlines.
+    ///
+    /// Returns `(text, content_end_line)` where `content_end_line` is the
+    /// line number of the last actual content character (not including consumed
+    /// whitespace from failed continuation lookahead).
     // cref: fy_reader_fetch_plain_scalar_handle_inline (fy-parse.c:4434)
-    fn scan_plain_scalar_text(&mut self) -> Cow<'input, str> {
-        let first_line = self.scan_plain_scalar_line();
+    fn scan_plain_scalar_text(&mut self) -> (Cow<'input, str>, u32) {
+        let first_line = self.scan_plain_scalar_line(true);
+        let start_line = self.reader.mark().line;
         if first_line.is_empty() {
-            return Cow::Borrowed(first_line);
+            return (Cow::Borrowed(first_line), start_line);
         }
 
         // In flow context, min_indent is 0 (any indentation continues).
@@ -779,12 +888,13 @@ impl<'input> Scanner<'input> {
 
         // Peek ahead to see if next line is a continuation.
         if !self.peek_continuation(min_indent) {
-            return Cow::Borrowed(first_line);
+            return (Cow::Borrowed(first_line), start_line);
         }
 
         // Multi-line: build folded result.
         let mut result = String::from(first_line);
         let mut empty_lines = 0u32;
+        let mut content_end_line = start_line;
 
         while matches!(self.reader.peek(), Some('\n' | '\r')) {
             self.reader.advance(); // consume newline
@@ -817,7 +927,7 @@ impl<'input> Scanner<'input> {
 
             // Scan the continuation line before adding fold separator,
             // in case a terminator stops it immediately (empty result).
-            let line = self.scan_plain_scalar_line();
+            let line = self.scan_plain_scalar_line(false);
             if line.is_empty() {
                 break;
             }
@@ -833,9 +943,10 @@ impl<'input> Scanner<'input> {
             }
 
             result.push_str(line);
+            content_end_line = self.reader.mark().line;
         }
 
-        Cow::Owned(result)
+        (Cow::Owned(result), content_end_line)
     }
 
     /// Peek ahead to check if a continuation line follows.
@@ -898,7 +1009,7 @@ impl<'input> Scanner<'input> {
         // Don't remove pending simple keys — a preceding tag/anchor's
         // simple key should remain if this scalar is part of the same key.
         let start_mark = self.reader.mark();
-        let text = self.scan_plain_scalar_text();
+        let (text, content_end_line) = self.scan_plain_scalar_text();
         let end_mark = self.reader.mark();
 
         if text.is_empty() {
@@ -913,7 +1024,7 @@ impl<'input> Scanner<'input> {
 
         let scalar = Self::scalar_token(text, ScalarStyle::Plain, start_mark, end_mark);
         let id = self.enqueue(scalar);
-        self.save_simple_key(id, start_mark);
+        self.save_simple_key_full(id, start_mark, content_end_line, false);
         // Multi-line plain scalars consume newlines internally. In block
         // context, crossing a line allows the NEXT token to be a simple key.
         self.simple_key_allowed = self.flow_level == 0 && end_mark.line > start_mark.line;
@@ -969,6 +1080,22 @@ impl<'input> Scanner<'input> {
         }
 
         let end_mark = self.reader.mark();
+
+        // YAML §6.8.2: a tag must be followed by s-separate (whitespace),
+        // a newline, EOF, or a flow indicator that properly terminates it.
+        // Content like `!invalid{}tag` is an error — `{` is not whitespace.
+        // cref: fy_fetch_tag (fy-parse.c:3342)
+        match self.reader.peek() {
+            None | Some(' ' | '\t' | '\n' | '\r') => {}
+            Some(',' | '[' | ']' | '{' | '}') if self.flow_level > 0 => {}
+            Some(c) => {
+                self.error = Some(ScanError {
+                    message: format!("invalid character '{c}' after tag"),
+                });
+                return;
+            }
+        }
+
         let tag_raw = self.reader.slice(start_mark.offset, end_mark.offset);
         // Decode URI percent-encoding in tag suffix (YAML §6.9.1).
         // E.g., `!e!tag%21` → `!e!tag!`.
@@ -1282,6 +1409,24 @@ impl<'input> Scanner<'input> {
                         result.pop();
                     }
                     self.reader.advance();
+                    // YAML §9.1.4: document markers at column 0 are forbidden
+                    // inside flow scalars. Check after consuming the newline.
+                    // cref: fy_reader_fetch_flow_scalar_handle (fy-reader.c)
+                    {
+                        let mut ws = 0;
+                        while matches!(self.reader.peek_at(ws), Some(' ' | '\t')) {
+                            ws += 1;
+                        }
+                        if ws == 0
+                            && self.reader.mark().column == 0
+                            && (self.is_document_start() || self.is_document_end())
+                        {
+                            self.error = Some(ScanError {
+                                message: "document marker inside single-quoted scalar".to_string(),
+                            });
+                            return;
+                        }
+                    }
                     let mut empty_lines = 0u32;
                     loop {
                         while matches!(self.reader.peek(), Some(' ' | '\t')) {
@@ -1292,6 +1437,20 @@ impl<'input> Scanner<'input> {
                             self.reader.advance();
                         } else {
                             break;
+                        }
+                    }
+                    // In block context, continuation lines of a quoted scalar
+                    // must be indented past the current block indent level.
+                    if self.flow_level == 0 {
+                        let min_indent = (self.indent + 1).max(0) as u32;
+                        if self.reader.mark().column < min_indent
+                            && !matches!(self.reader.peek(), Some('\''))
+                        {
+                            self.error = Some(ScanError {
+                                message: "single-quoted scalar continuation below block indent"
+                                    .to_string(),
+                            });
+                            return;
                         }
                     }
                     if empty_lines > 0 {
@@ -1486,6 +1645,24 @@ impl<'input> Scanner<'input> {
                         result.pop();
                     }
                     self.reader.advance(); // consume newline
+                    // YAML §9.1.4: document markers at column 0 are forbidden
+                    // inside flow scalars. Check after consuming the newline.
+                    // cref: fy_reader_fetch_flow_scalar_handle (fy-reader.c)
+                    {
+                        let mut ws = 0;
+                        while matches!(self.reader.peek_at(ws), Some(' ' | '\t')) {
+                            ws += 1;
+                        }
+                        if ws == 0
+                            && self.reader.mark().column == 0
+                            && (self.is_document_start() || self.is_document_end())
+                        {
+                            self.error = Some(ScanError {
+                                message: "document marker inside double-quoted scalar".to_string(),
+                            });
+                            return;
+                        }
+                    }
                     // Count empty lines.
                     let mut empty_lines = 0u32;
                     loop {
@@ -1497,6 +1674,21 @@ impl<'input> Scanner<'input> {
                             self.reader.advance();
                         } else {
                             break;
+                        }
+                    }
+                    // In block context, continuation lines of a quoted scalar
+                    // must be indented past the current block indent level.
+                    // cref: fy_reader_fetch_flow_scalar_handle (fy-reader.c)
+                    if self.flow_level == 0 {
+                        let min_indent = (self.indent + 1).max(0) as u32;
+                        if self.reader.mark().column < min_indent
+                            && !matches!(self.reader.peek(), Some('"'))
+                        {
+                            self.error = Some(ScanError {
+                                message: "double-quoted scalar continuation below block indent"
+                                    .to_string(),
+                            });
+                            return;
                         }
                     }
                     if empty_lines > 0 {
@@ -1560,6 +1752,28 @@ impl<'input> Scanner<'input> {
         // value indicator (JSON-compatible adjacent values).
         if self.flow_level > 0 {
             self.adjacent_value_offset = Some(self.reader.mark().offset);
+        }
+        // In block context, validate trailing content on the same line.
+        // Only `:` (value indicator), `#` (comment preceded by whitespace),
+        // newline, or EOF may follow a quoted scalar. Anything else is
+        // invalid trailing content (e.g., `"quoted" trailing`).
+        // cref: fy_reader_fetch_flow_scalar_handle (fy-reader.c)
+        if self.flow_level == 0 {
+            let mut lookahead = 0;
+            while self.reader.peek_at(lookahead) == Some(' ')
+                || self.reader.peek_at(lookahead) == Some('\t')
+            {
+                lookahead += 1;
+            }
+            match self.reader.peek_at(lookahead) {
+                None | Some('\n' | '\r' | ':') => {}
+                Some('#') if lookahead > 0 => {}
+                Some(c) => {
+                    self.error = Some(ScanError {
+                        message: format!("invalid trailing content '{c}' after quoted scalar"),
+                    });
+                }
+            }
         }
     }
 
@@ -1896,7 +2110,7 @@ fn fold_block_scalar(content: &str) -> String {
         let line = lines[i];
         if i > 0 {
             let prev = lines[i - 1];
-            if prev.is_empty() || prev.starts_with(' ') {
+            if prev.is_empty() || prev.starts_with([' ', '\t']) {
                 // Empty/MI line's break is always preserved.
                 result.push('\n');
             } else if line.is_empty() {
@@ -1906,12 +2120,12 @@ fn fold_block_scalar(content: &str) -> String {
                 let next_is_mi = lines[i + 1..line_count]
                     .iter()
                     .find(|l| !l.is_empty())
-                    .is_some_and(|l| l.starts_with(' '));
+                    .is_some_and(|l| l.starts_with([' ', '\t']));
                 if next_is_mi {
                     result.push('\n');
                 }
                 // else: trim (discard content's line break)
-            } else if line.starts_with(' ') {
+            } else if line.starts_with([' ', '\t']) {
                 // Content → more-indented: preserve.
                 result.push('\n');
             } else {

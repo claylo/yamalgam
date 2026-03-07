@@ -300,7 +300,7 @@ mod tests {
     fn renders_divan_and_gungraun() {
         let kdl = r#"
             preamble { code "use crate::example::Thing;" }
-            benchmark name=\"sample\" module=\"config\" return=\"u64\" {
+            benchmark name="sample" module="config" return="u64" {
                 body "black_box(42)"
             }
         "#;
