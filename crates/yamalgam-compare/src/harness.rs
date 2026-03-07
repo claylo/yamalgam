@@ -21,7 +21,7 @@ use crate::snapshot::{SpanSnapshot, TokenSnapshot};
 /// 1. `FYAML_TOKENIZE_PATH` environment variable
 /// 2. `tools/fyaml-tokenize/fyaml-tokenize` relative to the workspace root
 ///    (detected via `CARGO_MANIFEST_DIR` walking up to the workspace)
-fn find_fyaml_binary() -> Option<PathBuf> {
+pub fn find_fyaml_binary() -> Option<PathBuf> {
     // 1. Explicit env var.
     if let Ok(path) = std::env::var("FYAML_TOKENIZE_PATH") {
         let p = PathBuf::from(path);
@@ -232,6 +232,108 @@ fn token_to_snapshot(token: &yamalgam_scanner::Token<'_>) -> TokenSnapshot {
             end_line: token.atom.span.end.line,
             end_column: token.atom.span.end.column,
             end_offset: token.atom.span.end.offset,
+        },
+    }
+}
+
+/// Parse cached C token output into `Result<Vec<TokenSnapshot>, String>`.
+pub fn parse_cached_tokens(
+    entry: &crate::c_baseline::CacheEntry,
+) -> Result<Vec<TokenSnapshot>, String> {
+    if let Some(err) = &entry.error {
+        return Err(err.clone());
+    }
+    let mut tokens = Vec::new();
+    for line in entry.stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        tokens.push(parse_c_token_line(line)?);
+    }
+    Ok(tokens)
+}
+
+/// Parse cached C event output into `Result<Vec<EventSnapshot>, String>`.
+pub fn parse_cached_events(
+    entry: &crate::c_baseline::CacheEntry,
+) -> Result<Vec<EventSnapshot>, String> {
+    if let Some(err) = &entry.error {
+        return Err(err.clone());
+    }
+    let mut events = Vec::new();
+    for line in entry.stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        events.push(parse_c_event_line(line)?);
+    }
+    Ok(events)
+}
+
+/// Compare both implementations on the same input (token-level).
+///
+/// Uses cached C result if provided, otherwise spawns `fyaml-tokenize`.
+pub fn compare_input_cached(
+    c_cached: Option<&crate::c_baseline::CacheEntry>,
+    input: &[u8],
+) -> CompareResult {
+    let c_result = c_cached.map_or_else(|| run_c_tokenizer(input), parse_cached_tokens);
+    let rust_result = run_rust_scanner(input);
+
+    match (c_result, rust_result) {
+        (Ok(c_tokens), Ok(rust_tokens)) => compare_token_streams(&c_tokens, &rust_tokens),
+        (Err(c_err), Err(rust_err)) => {
+            if c_err == rust_err {
+                CompareResult::BothErrorMatch
+            } else {
+                CompareResult::BothErrorMismatch {
+                    c_error: c_err,
+                    rust_error: rust_err,
+                }
+            }
+        }
+        (Ok(c_tokens), Err(rust_err)) => CompareResult::CSuccessRustError {
+            rust_error: rust_err,
+            c_token_count: c_tokens.len(),
+        },
+        (Err(c_err), Ok(rust_tokens)) => CompareResult::RustSuccessCError {
+            c_error: c_err,
+            rust_token_count: rust_tokens.len(),
+        },
+    }
+}
+
+/// Compare both implementations on the same input (event-level).
+///
+/// Uses cached C result if provided, otherwise spawns `fyaml-tokenize --events`.
+pub fn compare_events_cached(
+    c_cached: Option<&crate::c_baseline::CacheEntry>,
+    input: &[u8],
+) -> CompareEventResult {
+    let c_result = c_cached.map_or_else(|| run_c_events(input), parse_cached_events);
+    let rust_result = run_rust_parser(input);
+
+    match (c_result, rust_result) {
+        (Ok(c_events), Ok(rust_events)) => compare_event_streams(&c_events, &rust_events),
+        (Err(c_err), Err(rust_err)) => {
+            if c_err == rust_err {
+                CompareEventResult::BothErrorMatch
+            } else {
+                CompareEventResult::BothErrorMismatch {
+                    c_error: c_err,
+                    rust_error: rust_err,
+                }
+            }
+        }
+        (Ok(c_events), Err(rust_err)) => CompareEventResult::CSuccessRustError {
+            rust_error: rust_err,
+            c_event_count: c_events.len(),
+        },
+        (Err(c_err), Ok(rust_events)) => CompareEventResult::RustSuccessCError {
+            c_error: c_err,
+            rust_event_count: rust_events.len(),
         },
     }
 }

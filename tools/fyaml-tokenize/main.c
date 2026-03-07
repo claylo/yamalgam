@@ -5,6 +5,13 @@
  * output, or the high-level parser API (fy_parser_parse) for event-level
  * output when --events is passed.
  *
+ * Modes:
+ *   (default)       Read all of stdin, process once, exit.
+ *   --batch         Length-prefixed protocol: read "<len>\n<bytes>" repeatedly,
+ *                   write JSON lines + "---END\n" per input. Errors go to
+ *                   stdout (not stderr) so the reader can associate them.
+ *   --events        Event mode (parser API) instead of token mode (scanner API).
+ *
  * Build: see accompanying Makefile
  */
 
@@ -118,26 +125,14 @@ static char *read_stdin(size_t *out_len)
 	return buf;
 }
 
-int main(int argc, char **argv)
+/*
+ * Process a single YAML input buffer and write results to out_fp.
+ * In batch mode, errors go to out_fp (stdout) instead of stderr.
+ * Returns 0 on success (STREAM_END seen), 1 on error.
+ */
+static int process_input(const char *input, size_t input_len,
+                         int events_mode, FILE *out_fp, FILE *err_fp)
 {
-	/* Parse argv for --events flag */
-	int events_mode = 0;
-	for (int i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "--events") == 0) {
-			events_mode = 1;
-		}
-	}
-
-	/* Read all of stdin */
-	size_t input_len = 0;
-	char *input = read_stdin(&input_len);
-	if (!input) {
-		fprintf(stderr, "{\"error\": \"failed to read stdin\"}\n");
-		return 1;
-	}
-
-	/* Create parser with default config */
-	// cref: fy_parser_create()
 	struct fy_parse_cfg cfg = {
 		.flags = FYPCF_QUIET,
 		.search_path = NULL,
@@ -146,18 +141,14 @@ int main(int argc, char **argv)
 	};
 	struct fy_parser *fyp = fy_parser_create(&cfg);
 	if (!fyp) {
-		fprintf(stderr, "{\"error\": \"fy_parser_create failed\"}\n");
-		free(input);
+		fprintf(err_fp, "{\"error\":\"fy_parser_create failed\"}\n");
 		return 1;
 	}
 
-	/* Set input from the buffer */
-	// cref: fy_parser_set_string()
 	int rc = fy_parser_set_string(fyp, input, input_len);
 	if (rc != 0) {
-		fprintf(stderr, "{\"error\": \"fy_parser_set_string failed\"}\n");
+		fprintf(err_fp, "{\"error\":\"fy_parser_set_string failed\"}\n");
 		fy_parser_destroy(fyp);
-		free(input);
 		return 1;
 	}
 
@@ -165,64 +156,56 @@ int main(int argc, char **argv)
 	int saw_stream_end = 0;
 
 	if (events_mode) {
-		/* Event mode — use fy_parser_parse() high-level API.
-		   No fy_parser_set_default_document_state() needed here;
-		   the parser handles document state internally. */
-		// cref: fy_parser_parse(), fy_parser_event_free()
 		struct fy_event *fye;
 		while ((fye = fy_parser_parse(fyp)) != NULL) {
 			const char *type_str = event_type_name(fye->type);
 
-			fprintf(stdout, "{\"type\":\"%s\"", type_str);
+			fprintf(out_fp, "{\"type\":\"%s\"", type_str);
 
-			/* Extract fields based on event type */
 			switch (fye->type) {
 			case FYET_DOCUMENT_START:
-				fprintf(stdout, ",\"implicit\":%s",
+				fprintf(out_fp, ",\"implicit\":%s",
 					fye->document_start.implicit ? "true" : "false");
 				break;
 			case FYET_DOCUMENT_END:
-				fprintf(stdout, ",\"implicit\":%s",
+				fprintf(out_fp, ",\"implicit\":%s",
 					fye->document_end.implicit ? "true" : "false");
 				break;
 			case FYET_SCALAR: {
-				/* Value */
 				size_t len = 0;
 				const char *text = fy_token_get_text(fye->scalar.value, &len);
 				if (text) {
-					fprintf(stdout, ",\"value\":\"");
-					json_escape(stdout, text, len);
-					fprintf(stdout, "\"");
+					fprintf(out_fp, ",\"value\":\"");
+					json_escape(out_fp, text, len);
+					fprintf(out_fp, "\"");
 				} else {
-					fprintf(stdout, ",\"value\":\"\"");
+					fprintf(out_fp, ",\"value\":\"\"");
 				}
-				/* Anchor */
 				if (fye->scalar.anchor) {
 					size_t alen = 0;
 					const char *atext = fy_token_get_text(fye->scalar.anchor, &alen);
 					if (atext) {
-						fprintf(stdout, ",\"anchor\":\"");
-						json_escape(stdout, atext, alen);
-						fprintf(stdout, "\"");
+						fprintf(out_fp, ",\"anchor\":\"");
+						json_escape(out_fp, atext, alen);
+						fprintf(out_fp, "\"");
 					} else {
-						fprintf(stdout, ",\"anchor\":null");
+						fprintf(out_fp, ",\"anchor\":null");
 					}
 				} else {
-					fprintf(stdout, ",\"anchor\":null");
+					fprintf(out_fp, ",\"anchor\":null");
 				}
-				/* Tag */
 				if (fye->scalar.tag) {
 					size_t tlen = 0;
 					const char *ttext = fy_token_get_text(fye->scalar.tag, &tlen);
 					if (ttext) {
-						fprintf(stdout, ",\"tag\":\"");
-						json_escape(stdout, ttext, tlen);
-						fprintf(stdout, "\"");
+						fprintf(out_fp, ",\"tag\":\"");
+						json_escape(out_fp, ttext, tlen);
+						fprintf(out_fp, "\"");
 					} else {
-						fprintf(stdout, ",\"tag\":null");
+						fprintf(out_fp, ",\"tag\":null");
 					}
 				} else {
-					fprintf(stdout, ",\"tag\":null");
+					fprintf(out_fp, ",\"tag\":null");
 				}
 				break;
 			}
@@ -231,14 +214,14 @@ int main(int argc, char **argv)
 					size_t alen = 0;
 					const char *atext = fy_token_get_text(fye->alias.anchor, &alen);
 					if (atext) {
-						fprintf(stdout, ",\"name\":\"");
-						json_escape(stdout, atext, alen);
-						fprintf(stdout, "\"");
+						fprintf(out_fp, ",\"name\":\"");
+						json_escape(out_fp, atext, alen);
+						fprintf(out_fp, "\"");
 					} else {
-						fprintf(stdout, ",\"name\":null");
+						fprintf(out_fp, ",\"name\":null");
 					}
 				} else {
-					fprintf(stdout, ",\"name\":null");
+					fprintf(out_fp, ",\"name\":null");
 				}
 				break;
 			}
@@ -252,27 +235,27 @@ int main(int argc, char **argv)
 					size_t alen = 0;
 					const char *atext = fy_token_get_text(anchor_tok, &alen);
 					if (atext) {
-						fprintf(stdout, ",\"anchor\":\"");
-						json_escape(stdout, atext, alen);
-						fprintf(stdout, "\"");
+						fprintf(out_fp, ",\"anchor\":\"");
+						json_escape(out_fp, atext, alen);
+						fprintf(out_fp, "\"");
 					} else {
-						fprintf(stdout, ",\"anchor\":null");
+						fprintf(out_fp, ",\"anchor\":null");
 					}
 				} else {
-					fprintf(stdout, ",\"anchor\":null");
+					fprintf(out_fp, ",\"anchor\":null");
 				}
 				if (tag_tok) {
 					size_t tlen = 0;
 					const char *ttext = fy_token_get_text(tag_tok, &tlen);
 					if (ttext) {
-						fprintf(stdout, ",\"tag\":\"");
-						json_escape(stdout, ttext, tlen);
-						fprintf(stdout, "\"");
+						fprintf(out_fp, ",\"tag\":\"");
+						json_escape(out_fp, ttext, tlen);
+						fprintf(out_fp, "\"");
 					} else {
-						fprintf(stdout, ",\"tag\":null");
+						fprintf(out_fp, ",\"tag\":null");
 					}
 				} else {
-					fprintf(stdout, ",\"tag\":null");
+					fprintf(out_fp, ",\"tag\":null");
 				}
 				break;
 			}
@@ -280,7 +263,7 @@ int main(int argc, char **argv)
 				break;
 			}
 
-			fprintf(stdout, "}\n");
+			fprintf(out_fp, "}\n");
 
 			if (fye->type == FYET_STREAM_END)
 				saw_stream_end = 1;
@@ -289,23 +272,13 @@ int main(int argc, char **argv)
 		}
 	} else {
 		/* Token mode — use fy_scan() low-level scanner API */
-
-		/* Initialize default document state so the scanner can resolve
-		   shorthand tag handles (! → !, !! → tag:yaml.org,2002:).
-		   Without this, fy_fetch_tag() fails because current_document_state is NULL. */
-		// cref: fy_parser_set_default_document_state(), fy_reset_document_state()
 		rc = fy_parser_set_default_document_state(fyp, NULL);
 		if (rc != 0) {
-			fprintf(stderr, "{\"error\": \"fy_parser_set_default_document_state failed\"}\n");
+			fprintf(err_fp, "{\"error\":\"fy_parser_set_default_document_state failed\"}\n");
 			fy_parser_destroy(fyp);
-			free(input);
 			return 1;
 		}
 
-		/* Iterate tokens using the low-level scanner API */
-		// cref: fy_scan(), fy_scan_token_free()
-		// cref: fy_token_get_type(), fy_token_start_mark(), fy_token_end_mark()
-		// cref: fy_token_get_text()
 		struct fy_token *fyt;
 		while ((fyt = fy_scan(fyp)) != NULL) {
 			enum fy_token_type type = fy_token_get_type(fyt);
@@ -313,17 +286,9 @@ int main(int argc, char **argv)
 			if (type == FYTT_STREAM_END)
 				saw_stream_end = 1;
 
-			/* Get start/end marks */
-			// cref: struct fy_mark { size_t input_pos; int line; int column; }
 			const struct fy_mark *sm = fy_token_start_mark(fyt);
 			const struct fy_mark *em = fy_token_end_mark(fyt);
 
-			/* Get text content for tokens that carry values.
-			   For TAG tokens, fy_token_get_text() returns the resolved URI
-			   (e.g. "tag:yaml.org,2002:str" for "!!str"). We reconstruct the
-			   raw shorthand form using handle + suffix to match yamalgam's
-			   scanner output. For TAG_DIRECTIVE, we format "handle prefix"
-			   with a space separator. */
 			size_t text_len = 0;
 			const char *text = NULL;
 			char tag_buf[1024];
@@ -332,7 +297,6 @@ int main(int argc, char **argv)
 				const char *handle = fy_tag_token_handle(fyt, &h_len);
 				const char *suffix = fy_tag_token_suffix(fyt, &s_len);
 				if (h_len == 0 && s_len > 0) {
-					/* Verbatim tag: !<uri> */
 					text_len = (size_t)snprintf(tag_buf, sizeof(tag_buf),
 						"!<%.*s>", (int)s_len, suffix);
 				} else {
@@ -354,49 +318,112 @@ int main(int argc, char **argv)
 				text = fy_token_get_text(fyt, &text_len);
 			}
 
-			/* Emit JSON line */
-			fprintf(stdout, "{\"type\":\"%s\",", type_str);
+			fprintf(out_fp, "{\"type\":\"%s\",", type_str);
 			if (text) {
-				fprintf(stdout, "\"value\":\"");
-				json_escape(stdout, text, text_len);
-				fprintf(stdout, "\",");
+				fprintf(out_fp, "\"value\":\"");
+				json_escape(out_fp, text, text_len);
+				fprintf(out_fp, "\",");
 			} else {
-				fprintf(stdout, "\"value\":null,");
+				fprintf(out_fp, "\"value\":null,");
 			}
 
 			if (sm) {
-				fprintf(stdout,
+				fprintf(out_fp,
 					"\"line\":%d,\"column\":%d,\"offset\":%zu,",
 					sm->line, sm->column, sm->input_pos);
 			} else {
-				fprintf(stdout,
+				fprintf(out_fp,
 					"\"line\":null,\"column\":null,\"offset\":null,");
 			}
 
 			if (em) {
-				fprintf(stdout,
+				fprintf(out_fp,
 					"\"end_line\":%d,\"end_column\":%d,\"end_offset\":%zu",
 					em->line, em->column, em->input_pos);
 			} else {
-				fprintf(stdout,
+				fprintf(out_fp,
 					"\"end_line\":null,\"end_column\":null,\"end_offset\":null");
 			}
 
-			fprintf(stdout, "}\n");
+			fprintf(out_fp, "}\n");
 
 			fy_scan_token_free(fyp, fyt);
 		}
 	}
 
-	/* fy_scan()/fy_parser_parse() returns NULL on both end-of-input and error.
-	   If we never saw STREAM_END, something went wrong. */
 	if (!saw_stream_end) {
-		fprintf(stderr, "{\"error\":\"scan terminated without STREAM_END\"}\n");
+		fprintf(err_fp, "{\"error\":\"scan terminated without STREAM_END\"}\n");
 		error = 1;
 	}
 
-	// cref: fy_parser_destroy()
 	fy_parser_destroy(fyp);
+	return error;
+}
+
+int main(int argc, char **argv)
+{
+	/* Parse argv */
+	int events_mode = 0;
+	int batch_mode = 0;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--events") == 0) {
+			events_mode = 1;
+		} else if (strcmp(argv[i], "--batch") == 0) {
+			batch_mode = 1;
+		}
+	}
+
+	if (batch_mode) {
+		/*
+		 * Batch mode: length-prefixed protocol.
+		 * Read "<decimal_length>\n" then exactly that many bytes.
+		 * Process each input, write JSON lines + "---END\n".
+		 * Errors go to stdout so the reader can associate them.
+		 */
+		char len_buf[32];
+		while (fgets(len_buf, sizeof(len_buf), stdin) != NULL) {
+			size_t input_len = (size_t)atol(len_buf);
+			char *input = malloc(input_len + 1);
+			if (!input) {
+				fprintf(stdout, "{\"error\":\"malloc failed\"}\n---END\n");
+				fflush(stdout);
+				continue;
+			}
+
+			size_t total_read = 0;
+			while (total_read < input_len) {
+				size_t n = fread(input + total_read, 1,
+				                 input_len - total_read, stdin);
+				if (n == 0) break;
+				total_read += n;
+			}
+			input[total_read] = '\0';
+
+			if (total_read < input_len) {
+				fprintf(stdout, "{\"error\":\"short read\"}\n---END\n");
+				fflush(stdout);
+				free(input);
+				continue;
+			}
+
+			/* Process — errors go to stdout in batch mode */
+			process_input(input, input_len, events_mode, stdout, stdout);
+			fprintf(stdout, "---END\n");
+			fflush(stdout);
+			free(input);
+		}
+		return 0;
+	}
+
+	/* Single-input mode (original behavior) */
+	size_t input_len = 0;
+	char *input = read_stdin(&input_len);
+	if (!input) {
+		fprintf(stderr, "{\"error\": \"failed to read stdin\"}\n");
+		return 1;
+	}
+
+	int error = process_input(input, input_len, events_mode, stdout, stderr);
 	free(input);
 
 	return error;
