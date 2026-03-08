@@ -17,11 +17,13 @@
 //! ```
 #![deny(unsafe_code)]
 
+pub mod compose;
 pub mod error;
 pub mod event;
 pub mod parser;
 pub mod resolve;
 
+pub use compose::{ComposeError, Composer};
 pub use error::ParseError;
 pub use event::{CollectionStyle, Event};
 pub use parser::Parser;
