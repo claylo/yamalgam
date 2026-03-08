@@ -1,0 +1,63 @@
+scale = 0.9
+linerad = 8px
+
+# --- Top: YAML Input ---
+YAML: box "YAML bytes" fit fill 0xe8e8e8 rad 5px
+
+# --- Scanner ---
+arrow down 0.4in
+SCAN: box "yamalgam-scanner" italic "(tokens)" fit fill 0xd0ece8 rad 5px
+
+# --- Parser ---
+arrow down 0.4in
+PARSE: box "yamalgam-parser" italic "(events)" fit fill 0xd0ece8 rad 5px
+
+# --- Consumer boxes ---
+SERDE: box "Streaming" "serde Deser" fit fill 0xd8ecd0 rad 5px \
+    at PARSE.s + (-2.0in, -0.9in)
+SERDESUB: text "zero alloc" italic small at 0.22in below SERDE
+
+VALUE: box "Value" "(DOM)" fit fill 0xd8ecd0 rad 5px \
+    at PARSE.s + (-0.7in, -0.9in)
+VALSUB: text "lossy" italic small at 0.22in below VALUE
+
+CST: box "CST" "(lossless)" fit fill 0xffd8a8 rad 5px \
+    at PARSE.s + (0.7in, -0.9in)
+CSTSUB: text "round-trip" italic small at 0.22in below CST
+
+SAX: box "SAX /" "Callbacks" fit fill 0xd8ecd0 rad 5px \
+    at PARSE.s + (2.0in, -0.9in)
+SAXSUB: text "zero alloc" italic small at 0.22in below SAX
+
+# --- Fan-out arrows ---
+arrow from PARSE.s down 0.25in \
+    then left until even with SERDE \
+    then to SERDE.n
+arrow from PARSE.s to VALUE.n
+arrow from PARSE.s down 0.25in \
+    then right until even with CST \
+    then to CST.n
+arrow from PARSE.s down 0.25in \
+    then right until even with SAX \
+    then to SAX.n
+
+# --- Label ---
+text "User chooses materialization strategy" bold \
+    at PARSE.s + (0, -0.38in)
+
+# --- Downstream from Value ---
+SERDEVALUE: box "serde" "from Value" fit fill 0xe8d8ec rad 5px \
+    at 0.9in below VALUE
+arrow from VALUE.s to SERDEVALUE.n
+
+# --- Downstream from CST ---
+LSP: box "LSP" fit fill 0xe8d8ec rad 5px \
+    at CST.s + (-0.6in, -0.9in)
+LINT: box "Linter" fit fill 0xe8d8ec rad 5px \
+    at CST.s + (0, -0.9in)
+EMIT: box "Pretty" "Emitter" fit fill 0xe8d8ec rad 5px \
+    at CST.s + (0.65in, -0.9in)
+
+arrow from CST.s down 0.2in then left until even with LSP then to LSP.n
+arrow from CST.s to LINT.n
+arrow from CST.s down 0.2in then right until even with EMIT then to EMIT.n

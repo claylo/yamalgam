@@ -1,0 +1,56 @@
+@schema {id crate:tracey-config@1, cli tracey}
+
+specs (
+    // YAML Specification — tracked across versions via tracey versioning.
+    // Prefix: y (e.g., y[impl char.c-printable])
+    // 1.1 markers are version 1 (implicit). 1.2.2 bumps where requirements changed.
+    {
+        name yaml
+        source_url https://yaml.org/spec/
+        include (docs/spec/yaml-1.1/**/*.md docs/spec/yaml-1.2.2/**/*.md)
+        impls (
+            {
+                name scanner
+                include (crates/yamalgam-scanner/src/**/*.rs)
+                test_include (crates/yamalgam-scanner/tests/**/*.rs)
+            }
+            {
+                name parser
+                include (crates/yamalgam-parser/src/**/*.rs)
+                test_include (crates/yamalgam-parser/tests/**/*.rs)
+            }
+            {
+                name core
+                include (crates/yamalgam-core/src/**/*.rs)
+            }
+            {
+                name compliance
+                include (crates/yamalgam-compare/src/**/*.rs)
+                test_include (crates/yamalgam-compare/tests/**/*.rs)
+            }
+        )
+    }
+
+    // yg Query Language Specification — our own spec.
+    // Prefix: r (already uses r[...] markers)
+    {
+        name yg-query
+        include (docs/spec/yg-query-language-spec-draft-01.md)
+        impls (
+            {
+                name cli
+                include (crates/yamalgam/src/**/*.rs)
+                test_include (crates/yamalgam/tests/**/*.rs)
+            }
+            {
+                name core
+                include (crates/yamalgam-core/src/**/*.rs)
+            }
+            {
+                name parser
+                include (crates/yamalgam-parser/src/**/*.rs)
+                test_include (crates/yamalgam-parser/tests/**/*.rs)
+            }
+        )
+    }
+)
