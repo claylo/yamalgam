@@ -192,6 +192,33 @@ bench-cli:
   ./scripts/bench-cli.sh
 
 
+# Run a single fuzz target (default: scanner bytes, 60s)
+fuzz target='fuzz_scanner_bytes' duration='60':
+    cargo +nightly fuzz run {{target}} -- -max_total_time={{duration}}
+
+# Run all fuzz targets (default: 60s each)
+fuzz-all duration='60':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for target in fuzz_scanner_bytes fuzz_parser_bytes fuzz_scanner_structured \
+                  fuzz_parser_structured fuzz_limits fuzz_differential; do
+        echo "=== Fuzzing $target for {{duration}}s ==="
+        cargo +nightly fuzz run "$target" -- -max_total_time={{duration}} || true
+    done
+
+# Run all fuzz targets for 1 hour each
+fuzz-long:
+    just fuzz-all 3600
+
+# Minimize fuzz corpus (remove redundant inputs)
+fuzz-corpus-min:
+    cargo +nightly fuzz cmin fuzz_scanner_bytes
+    cargo +nightly fuzz cmin fuzz_parser_bytes
+
+# Seed fuzz corpus from YAML Test Suite
+fuzz-seed:
+    scripts/seed-fuzz-corpus
+
 # Install site dependencies
 site-install:
   cd site && npm install
