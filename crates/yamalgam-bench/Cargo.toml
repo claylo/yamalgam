@@ -23,6 +23,12 @@ rust-yaml = "0.0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# Optional peers — require external native libraries
+yamlstar = { version = "0.1", optional = true }
+
+[features]
+yamlstar = ["dep:yamlstar"]
+
 [dev-dependencies]
 divan = "0.1"
 
