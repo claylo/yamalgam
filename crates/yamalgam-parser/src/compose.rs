@@ -13,7 +13,7 @@ use yamalgam_scanner::ScalarStyle;
 use crate::error::ParseError;
 use crate::event::Event;
 use crate::parser::Parser;
-use crate::resolve::{NoopResolver, ResolveError, ResolvedEvents};
+use crate::resolve::{NoopResolver, ResolveError, ResolvedEvents, Resolver};
 
 /// Errors that can occur during composition (event-to-Value conversion).
 #[derive(Debug)]
@@ -79,12 +79,23 @@ impl<'input> Composer<'input, ResolvedEvents<'input, NoopResolver>> {
     /// [`compose_stream`](Composer::compose_stream).
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(input: &'input str) -> Result<Vec<Value>, ComposeError> {
+        Self::with_resolver(input, NoopResolver)
+    }
+}
+
+impl<'input, R: Resolver<'input> + 'input> Composer<'input, ResolvedEvents<'input, R>> {
+    /// Compose documents from a YAML string using a custom resolver.
+    ///
+    /// The resolver intercepts every parser event before it reaches the
+    /// composer, enabling custom tag handling, `!include` expansion,
+    /// or any other event-level transformation.
+    pub fn with_resolver(input: &'input str, resolver: R) -> Result<Vec<Value>, ComposeError> {
         let parser = Parser::new(input);
-        let resolved = ResolvedEvents::new(
+        let events = ResolvedEvents::new(
             Box::new(parser.map(|r| r.map_err(ResolveError::Parse))),
-            NoopResolver,
+            resolver,
         );
-        let mut composer = Composer::new(resolved);
+        let mut composer = Composer::new(events);
         composer.compose_stream()
     }
 }

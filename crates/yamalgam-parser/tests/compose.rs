@@ -1,7 +1,10 @@
 #![allow(clippy::approx_constant, missing_docs)]
 
+use std::borrow::Cow;
+
 use yamalgam_core::Value;
-use yamalgam_parser::{from_str, from_str_single};
+use yamalgam_parser::compose::Composer;
+use yamalgam_parser::{Event, ResolveError, Resolver, from_str, from_str_single};
 
 #[test]
 fn parse_simple_mapping() {
@@ -70,4 +73,38 @@ fn parse_empty_string() {
 #[test]
 fn undefined_alias_is_error() {
     assert!(from_str_single("*nope").is_err());
+}
+
+/// A test resolver that uppercases all plain scalar values.
+struct UppercaseResolver;
+
+impl<'input> Resolver<'input> for UppercaseResolver {
+    fn on_event(&mut self, event: Event<'input>) -> Result<Vec<Event<'input>>, ResolveError> {
+        match event {
+            Event::Scalar {
+                anchor,
+                tag,
+                value,
+                style,
+                span,
+            } => {
+                let upper = value.to_uppercase();
+                Ok(vec![Event::Scalar {
+                    anchor,
+                    tag,
+                    value: Cow::Owned(upper),
+                    style,
+                    span,
+                }])
+            }
+            other => Ok(vec![other]),
+        }
+    }
+}
+
+#[test]
+fn custom_resolver_transforms_events() {
+    let docs = Composer::with_resolver("key: value", UppercaseResolver).unwrap();
+    // Both key and value are uppercased since both are plain scalars.
+    assert_eq!(docs[0].get("KEY"), Some(&Value::from("VALUE")));
 }
