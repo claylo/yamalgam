@@ -670,7 +670,7 @@ to.
 This specification defines version "`1.2`", including recommendations for _YAML
 1.1 processing_.
 
-y[struct.yaml-directive.must-accept-1.2]
+y[struct.yaml-directive.must-accept-current]
 A version 1.2 YAML [processor] must accept [documents] with an explicit "`%YAML
 1.2`" directive, as well as [documents] lacking a "`YAML`" directive.
 Such [documents] are assumed to conform to the 1.2 version specification.
@@ -683,13 +683,13 @@ y[struct.yaml-directive.should-reject-higher-major]
 [Documents] with a "`YAML`" directive specifying a higher major version (e.g.
 "`%YAML 2.0`") should be rejected with an appropriate error message.
 
-y[struct.yaml-directive.must-accept-1.1]
+y[struct.yaml-directive.must-accept-prior]
 A version 1.2 YAML [processor] must also accept [documents] with an explicit
 "`%YAML 1.1`" directive.
 Note that version 1.2 is mostly a superset of version 1.1, defined for the
 purpose of ensuring _JSON compatibility_.
 
-y[struct.yaml-directive.should-process-1.1-as-1.2]
+y[struct.yaml-directive.should-process-prior-as-current]
 Hence a version 1.2 [processor] should process version 1.1 [documents] as if
 they were version 1.2, giving a warning on points of incompatibility (handling
 of [non-ASCII line breaks], as described [above]).
