@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use serde::Deserialize;
 use yamalgam_serde::from_str;
 

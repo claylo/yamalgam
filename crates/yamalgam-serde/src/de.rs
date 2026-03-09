@@ -6,7 +6,7 @@ use std::iter::Peekable;
 
 use serde::de::{self, DeserializeSeed, Visitor};
 use yamalgam_core::value::Value;
-use yamalgam_core::{ResourceLimits, TagResolver, Yaml12TagResolver, resolve_plain_scalar};
+use yamalgam_core::{LoaderConfig, ResourceLimits, TagResolver, Yaml12TagResolver};
 use yamalgam_parser::{Event, ParseError, Parser, ScalarStyle};
 
 use crate::error::Error;
@@ -67,6 +67,24 @@ impl<'input> Deserializer<'input> {
             events: (Box::new(parser) as Box<dyn Iterator<Item = _> + 'input>).peekable(),
             tag_resolver: Box::new(Yaml12TagResolver),
             limits,
+            finished: false,
+            at_document_start: false,
+            anchors: HashMap::new(),
+            anchor_count: 0,
+            alias_expansions: 0,
+            replay_buffer: VecDeque::new(),
+        }
+    }
+
+    /// Create a `Deserializer` from a YAML input string with a full
+    /// [`LoaderConfig`] (resource limits + tag resolution).
+    #[must_use]
+    pub fn from_str_with_config(input: &'input str, config: &LoaderConfig) -> Self {
+        let parser = Parser::with_config(input, config);
+        Self {
+            events: (Box::new(parser) as Box<dyn Iterator<Item = _> + 'input>).peekable(),
+            tag_resolver: Box::new(config.tag_resolution),
+            limits: config.limits.clone(),
             finished: false,
             at_document_start: false,
             anchors: HashMap::new(),
@@ -233,11 +251,7 @@ impl<'input> Deserializer<'input> {
     }
 
     /// Register an anchor, checking resource limits.
-    fn register_anchor(
-        &mut self,
-        name: String,
-        events: Vec<Event<'input>>,
-    ) -> Result<(), Error> {
+    fn register_anchor(&mut self, name: String, events: Vec<Event<'input>>) -> Result<(), Error> {
         self.anchor_count += 1;
         self.limits
             .check_anchor_count(self.anchor_count)
@@ -341,7 +355,11 @@ impl<'input> Deserializer<'input> {
                 if *style != ScalarStyle::Plain {
                     return Ok(false);
                 }
-                Ok(matches!(resolve_plain_scalar(value), Value::Null))
+                let value = value.clone();
+                Ok(matches!(
+                    self.tag_resolver.resolve_scalar(&value),
+                    Value::Null
+                ))
             }
             // Empty document / stream → null.
             Event::StreamEnd | Event::DocumentEnd { .. } => Ok(true),
@@ -404,13 +422,25 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     }
 
     fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-        let (value, _style) = self.expect_scalar()?;
-        let b = value.parse::<bool>().map_err(|_| Error::Unexpected {
-            expected: "boolean",
-            found: value.to_string(),
-            span: None,
-        })?;
-        visitor.visit_bool(b)
+        let (value, style) = self.expect_scalar()?;
+        if style == ScalarStyle::Plain {
+            match self.tag_resolver.resolve_scalar(&value) {
+                Value::Bool(b) => visitor.visit_bool(b),
+                _ => Err(Error::Unexpected {
+                    expected: "boolean",
+                    found: value.to_string(),
+                    span: None,
+                }),
+            }
+        } else {
+            // Quoted scalars: try direct parse (only "true"/"false").
+            let b = value.parse::<bool>().map_err(|_| Error::Unexpected {
+                expected: "boolean",
+                found: value.to_string(),
+                span: None,
+            })?;
+            visitor.visit_bool(b)
+        }
     }
 
     fn deserialize_i8<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
@@ -522,7 +552,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             Event::Scalar { .. } => {
                 let (value, style) = self.expect_scalar()?;
                 if style == ScalarStyle::Plain {
-                    match resolve_plain_scalar(&value) {
+                    match self.tag_resolver.resolve_scalar(&value) {
                         Value::Null => visitor.visit_unit(),
                         _ => Err(Error::Unexpected {
                             expected: "null",
@@ -693,7 +723,7 @@ impl Deserializer<'_> {
     fn parse_integer(&mut self) -> Result<i64, Error> {
         let (value, style) = self.expect_scalar()?;
         if style == ScalarStyle::Plain {
-            match resolve_plain_scalar(&value) {
+            match self.tag_resolver.resolve_scalar(&value) {
                 Value::Integer(i) => Ok(i),
                 _ => Err(Error::Unexpected {
                     expected: "integer",
@@ -738,7 +768,7 @@ impl Deserializer<'_> {
     fn parse_float(&mut self) -> Result<f64, Error> {
         let (value, style) = self.expect_scalar()?;
         if style == ScalarStyle::Plain {
-            match resolve_plain_scalar(&value) {
+            match self.tag_resolver.resolve_scalar(&value) {
                 Value::Float(f) => Ok(f),
                 Value::Integer(i) => Ok(i as f64),
                 _ => Err(Error::Unexpected {
