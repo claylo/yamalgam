@@ -23,5 +23,9 @@ pretty_assertions = "1"
 name = "compliance"
 harness = false
 
+[[test]]
+name = "cst_round_trip"
+harness = false
+
 [lints]
 workspace = true
