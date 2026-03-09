@@ -69,7 +69,7 @@ pub use error::{ConfigError, ConfigResult};
 
 pub use loader::{IncludePolicy, LoaderConfig, RefPolicy, ResolutionPolicy, ResourceLimits};
 
-pub use tag::{resolve_plain_scalar, Yaml12TagResolver};
+pub use tag::{Yaml12TagResolver, resolve_plain_scalar};
 
 pub use tag_resolution::{
     FailsafeTagResolver, JsonTagResolver, TagResolution, TagResolver, Yaml11TagResolver,
