@@ -1,6 +1,7 @@
 //! Streaming serde `Deserializer` over the yamalgam parser event stream.
 
 use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 
 use serde::de::{self, DeserializeSeed, Visitor};
@@ -14,18 +15,29 @@ use crate::error::Error;
 ///
 /// No intermediate DOM is built — events are consumed on the fly. This means
 /// deserialization is single-pass and allocation-light for scalar values.
+///
+/// Anchors are buffered on first encounter and replayed when aliases reference
+/// them. Resource limits cap both anchor count and alias expansion count to
+/// defend against Billion Laughs and similar amplification attacks.
 pub struct Deserializer<'input> {
     /// Event source (parser or resolved events), wrapped in Peekable.
     events: Peekable<Box<dyn Iterator<Item = Result<Event<'input>, ParseError>> + 'input>>,
     /// Tag resolver for plain scalar typing.
     tag_resolver: Box<dyn TagResolver>,
-    /// Resource limits (reserved for future use in nested structures).
-    #[allow(dead_code)]
+    /// Resource limits for anchor/alias caps and future extensions.
     limits: ResourceLimits,
     /// True once `StreamEnd` has been consumed or an error occurred.
     finished: bool,
     /// True when we've consumed `DocumentStart` and are inside a document.
     at_document_start: bool,
+    /// Buffered event sequences keyed by anchor name.
+    anchors: HashMap<String, Vec<Event<'input>>>,
+    /// Number of anchors registered so far (for limit checks).
+    anchor_count: usize,
+    /// Number of alias expansions performed so far (for limit checks).
+    alias_expansions: usize,
+    /// Replay buffer: drained before the main event iterator.
+    replay_buffer: VecDeque<Event<'input>>,
 }
 
 impl<'input> Deserializer<'input> {
@@ -40,25 +52,51 @@ impl<'input> Deserializer<'input> {
             limits: ResourceLimits::none(),
             finished: false,
             at_document_start: false,
+            anchors: HashMap::new(),
+            anchor_count: 0,
+            alias_expansions: 0,
+            replay_buffer: VecDeque::new(),
         }
     }
 
-    /// Consume the next event, skipping structural events (Comment, BlockEntry,
-    /// `KeyIndicator`, `ValueIndicator`).
+    /// Create a `Deserializer` with explicit resource limits.
+    #[must_use]
+    pub fn from_str_with_limits(input: &'input str, limits: ResourceLimits) -> Self {
+        let parser = Parser::new(input);
+        Self {
+            events: (Box::new(parser) as Box<dyn Iterator<Item = _> + 'input>).peekable(),
+            tag_resolver: Box::new(Yaml12TagResolver),
+            limits,
+            finished: false,
+            at_document_start: false,
+            anchors: HashMap::new(),
+            anchor_count: 0,
+            alias_expansions: 0,
+            replay_buffer: VecDeque::new(),
+        }
+    }
+
+    /// Consume the next raw event from the replay buffer or main iterator,
+    /// skipping structural events and auto-consuming stream/document framing.
     ///
-    /// Also auto-consumes `StreamStart` and `DocumentStart` when they appear,
-    /// since serde consumers don't care about stream/document framing.
-    fn next_event(&mut self) -> Result<Event<'input>, Error> {
+    /// This is the low-level event source that does NOT perform anchor/alias
+    /// processing. Used internally by `next_event()` and by the anchor
+    /// buffering loop.
+    fn next_raw_event(&mut self) -> Result<Event<'input>, Error> {
         loop {
-            let event = self
-                .events
-                .next()
-                .ok_or_else(|| Error::Unexpected {
-                    expected: "event",
-                    found: "end of stream".to_string(),
-                    span: None,
-                })?
-                .map_err(Error::Parse)?;
+            // Drain replay buffer first.
+            let event = if let Some(ev) = self.replay_buffer.pop_front() {
+                ev
+            } else {
+                self.events
+                    .next()
+                    .ok_or_else(|| Error::Unexpected {
+                        expected: "event",
+                        found: "end of stream".to_string(),
+                        span: None,
+                    })?
+                    .map_err(Error::Parse)?
+            };
 
             // Skip structural events that serde consumers ignore.
             if event.is_structural() {
@@ -84,57 +122,130 @@ impl<'input> Deserializer<'input> {
         }
     }
 
-    /// Peek the next non-structural event without consuming it.
+    /// Consume the next event, handling anchors and aliases transparently.
     ///
-    /// Auto-consumes `StreamStart` and `DocumentStart` as a side effect
-    /// (same as `next_event`).
-    fn peek_event(&mut self) -> Result<&Event<'input>, Error> {
-        // Drain structural/framing events until we see something meaningful.
-        loop {
-            let event = self
-                .events
-                .peek()
-                .ok_or_else(|| Error::Unexpected {
-                    expected: "event",
-                    found: "end of stream".to_string(),
-                    span: None,
-                })?
-                .as_ref()
-                .map_err(|e| Error::Parse(e.clone()))?;
+    /// - When an anchored scalar is encountered, it is recorded and returned
+    ///   with the anchor stripped (to prevent re-processing on peek pushback).
+    /// - When an anchored collection (sequence/mapping) is encountered, all
+    ///   sub-events are eagerly buffered. The original events (with anchor)
+    ///   are stored under the anchor name. Anchor-stripped copies are pushed
+    ///   into the replay buffer for current deserialization.
+    /// - When an alias is encountered, the buffered events for that anchor
+    ///   are cloned into the replay buffer (anchor-stripped), and the first
+    ///   event is returned.
+    fn next_event(&mut self) -> Result<Event<'input>, Error> {
+        let event = self.next_raw_event()?;
 
-            match event {
-                _ if event.is_structural() => {
-                    // Consume and discard.
-                    let _ = self.events.next();
-                    continue;
-                }
-                Event::StreamStart => {
-                    let _ = self.events.next();
-                    continue;
-                }
-                Event::DocumentStart { .. } => {
-                    self.at_document_start = true;
-                    let _ = self.events.next();
-                    continue;
-                }
-                _ => {
-                    // Now peek returns a meaningful event. We need to re-peek
-                    // since we may have consumed items above.
-                    break;
-                }
+        match event {
+            Event::Scalar {
+                anchor: Some(ref name),
+                ..
+            } => {
+                let anchor_name = name.as_ref().to_owned();
+                // Store the event WITH anchor for alias replay.
+                self.register_anchor(anchor_name, vec![strip_anchor(event.clone())])?;
+                // Return with anchor stripped.
+                Ok(strip_anchor(event))
             }
+            Event::SequenceStart {
+                anchor: Some(ref name),
+                ..
+            }
+            | Event::MappingStart {
+                anchor: Some(ref name),
+                ..
+            } => {
+                let anchor_name = name.as_ref().to_owned();
+                // Buffer the entire collection (start through matching end).
+                let mut buffer = vec![strip_anchor(event)];
+                let mut depth: u32 = 1;
+                loop {
+                    let sub = self.next_raw_event()?;
+                    match &sub {
+                        Event::SequenceStart { .. } | Event::MappingStart { .. } => {
+                            depth += 1;
+                        }
+                        Event::SequenceEnd { .. } | Event::MappingEnd { .. } => {
+                            depth -= 1;
+                        }
+                        _ => {}
+                    }
+                    buffer.push(strip_anchor(sub));
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                self.register_anchor(anchor_name, buffer.clone())?;
+                // Push all buffered events into the replay buffer so the
+                // caller sees them in order.
+                for ev in buffer {
+                    self.replay_buffer.push_back(ev);
+                }
+                // Return the first event from replay.
+                self.next_raw_event()
+            }
+            Event::Alias { ref name, ref span } => {
+                let anchor_name = name.as_ref();
+                let span_copy = *span;
+                let buffered = self
+                    .anchors
+                    .get(anchor_name)
+                    .ok_or_else(|| Error::UndefinedAlias {
+                        name: anchor_name.to_owned(),
+                        span: Some(span_copy),
+                    })?
+                    .clone();
+
+                self.alias_expansions += 1;
+                self.limits
+                    .check_alias_expansions(self.alias_expansions)
+                    .map_err(Error::LimitExceeded)?;
+
+                // Push buffered events into replay.
+                for ev in buffered {
+                    self.replay_buffer.push_back(ev);
+                }
+                // Return the first replayed event.
+                self.next_raw_event()
+            }
+            _ => Ok(event),
+        }
+    }
+
+    /// Register an anchor, checking resource limits.
+    fn register_anchor(
+        &mut self,
+        name: String,
+        events: Vec<Event<'input>>,
+    ) -> Result<(), Error> {
+        self.anchor_count += 1;
+        self.limits
+            .check_anchor_count(self.anchor_count)
+            .map_err(Error::LimitExceeded)?;
+        self.anchors.insert(name, events);
+        Ok(())
+    }
+
+    /// Peek the next semantic event without consuming it.
+    ///
+    /// Internally calls `next_event()` (which handles structural skipping,
+    /// stream/document framing, anchor recording, and alias expansion), then
+    /// stashes the result at the front of `replay_buffer` so the next
+    /// `next_raw_event()` / `next_event()` call returns it.
+    fn peek_event(&mut self) -> Result<&Event<'input>, Error> {
+        // If replay_buffer already has a non-structural, non-framing event
+        // at the front (from a previous peek), just return it.
+        if let Some(front) = self.replay_buffer.front()
+            && !front.is_structural()
+            && !matches!(front, Event::StreamStart | Event::DocumentStart { .. })
+        {
+            return Ok(self.replay_buffer.front().unwrap());
         }
 
-        // After draining, the next peeked event should be non-structural.
-        self.events
-            .peek()
-            .ok_or_else(|| Error::Unexpected {
-                expected: "event",
-                found: "end of stream".to_string(),
-                span: None,
-            })?
-            .as_ref()
-            .map_err(|e| Error::Parse(e.clone()))
+        // Pull through next_event() which handles everything, then stash.
+        let event = self.next_event()?;
+        self.replay_buffer.push_front(event);
+        Ok(self.replay_buffer.front().unwrap())
     }
 
     /// Check that the document and stream have ended.
@@ -143,10 +254,15 @@ impl<'input> Deserializer<'input> {
     /// isn't a second document in the input.
     pub fn check_end(&mut self) -> Result<(), Error> {
         loop {
-            let event = match self.events.next() {
-                Some(Ok(e)) => e,
-                Some(Err(e)) => return Err(Error::Parse(e)),
-                None => return Ok(()),
+            // Drain replay buffer first, then main iterator.
+            let event = if let Some(ev) = self.replay_buffer.pop_front() {
+                ev
+            } else {
+                match self.events.next() {
+                    Some(Ok(e)) => e,
+                    Some(Err(e)) => return Err(Error::Parse(e)),
+                    None => return Ok(()),
+                }
             };
 
             if event.is_structural() {
@@ -234,13 +350,6 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             }
             Event::SequenceStart { .. } => self.deserialize_seq(visitor),
             Event::MappingStart { .. } => self.deserialize_map(visitor),
-            Event::Alias { name, span, .. } => {
-                let _ = self.next_event()?;
-                Err(Error::UndefinedAlias {
-                    name: name.into_owned(),
-                    span: Some(span),
-                })
-            }
             Event::StreamEnd => visitor.visit_unit(),
             Event::DocumentEnd { .. } => {
                 // Empty document — treat as null.
@@ -618,6 +727,48 @@ fn visit_cow_str<'de, V: Visitor<'de>>(
     match value {
         Cow::Borrowed(s) => visitor.visit_borrowed_str(s),
         Cow::Owned(s) => visitor.visit_string(s),
+    }
+}
+
+/// Strip the anchor from an event so it won't be re-processed on replay.
+fn strip_anchor(event: Event<'_>) -> Event<'_> {
+    match event {
+        Event::Scalar {
+            anchor: Some(_),
+            tag,
+            value,
+            style,
+            span,
+        } => Event::Scalar {
+            anchor: None,
+            tag,
+            value,
+            style,
+            span,
+        },
+        Event::SequenceStart {
+            anchor: Some(_),
+            tag,
+            style,
+            span,
+        } => Event::SequenceStart {
+            anchor: None,
+            tag,
+            style,
+            span,
+        },
+        Event::MappingStart {
+            anchor: Some(_),
+            tag,
+            style,
+            span,
+        } => Event::MappingStart {
+            anchor: None,
+            tag,
+            style,
+            span,
+        },
+        other => other,
     }
 }
 
