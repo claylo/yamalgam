@@ -57,6 +57,8 @@ pub mod observability;
 
 pub mod tag;
 
+pub mod tag_resolution;
+
 pub mod value;
 
 pub use config::{Config, ConfigLoader, LogLevel};
@@ -67,6 +69,8 @@ pub use error::{ConfigError, ConfigResult};
 
 pub use loader::{IncludePolicy, LoaderConfig, RefPolicy, ResolutionPolicy, ResourceLimits};
 
-pub use tag::resolve_plain_scalar;
+pub use tag::{resolve_plain_scalar, Yaml12TagResolver};
+
+pub use tag_resolution::{FailsafeTagResolver, TagResolution, TagResolver};
 
 pub use value::{Mapping, Value};
