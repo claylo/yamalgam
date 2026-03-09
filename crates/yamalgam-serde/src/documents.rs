@@ -3,8 +3,8 @@
 use serde::Deserialize;
 use yamalgam_parser::Event;
 
-use crate::de::Deserializer;
 use crate::Error;
+use crate::de::Deserializer;
 
 /// Iterator over YAML documents in a stream.
 ///

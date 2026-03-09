@@ -16,6 +16,11 @@
 //! and shell completions via `xtask`.
 pub mod commands;
 
+// Re-export serde deserialization API.
+pub use yamalgam_serde::{
+    Deserializer, Error as DeserializeError, from_reader, from_str, from_str_with_config,
+};
+
 use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 

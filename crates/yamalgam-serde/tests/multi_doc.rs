@@ -1,5 +1,7 @@
+#![allow(missing_docs)]
+
 use serde::Deserialize;
-use yamalgam_serde::{from_str, Deserializer};
+use yamalgam_serde::{Deserializer, from_str};
 
 #[test]
 fn single_document_via_from_str() {
@@ -12,7 +14,10 @@ fn from_str_errors_on_multiple_documents() {
     let result = from_str::<i64>("42\n---\n99");
     assert!(result.is_err());
     assert!(
-        result.unwrap_err().to_string().contains("more than one document"),
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("more than one document"),
         "error should mention multiple documents"
     );
 }
@@ -77,9 +82,7 @@ fn documents_with_doc_end_markers() {
 fn documents_stops_on_error() {
     // An error in one document should stop iteration
     let input = "---\n42\n---\n[invalid";
-    let results: Vec<Result<i64, _>> = Deserializer::from_str(input)
-        .documents::<i64>()
-        .collect();
+    let results: Vec<Result<i64, _>> = Deserializer::from_str(input).documents::<i64>().collect();
     assert!(results[0].is_ok());
     assert_eq!(results[0].as_ref().unwrap(), &42);
     // The second document should fail (it's a sequence, not a scalar)
