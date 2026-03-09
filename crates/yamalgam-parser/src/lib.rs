@@ -17,59 +17,14 @@
 //! ```
 #![deny(unsafe_code)]
 
-pub mod compose;
 pub mod cst;
 pub mod error;
 pub mod event;
 pub mod parser;
 pub mod resolve;
 
-pub use compose::{ComposeError, Composer};
 pub use error::ParseError;
 pub use event::{CollectionStyle, Event};
 pub use parser::Parser;
 pub use resolve::{NoopResolver, ResolveError, ResolvedEvents, Resolver};
 pub use yamalgam_scanner::ScalarStyle;
-
-use yamalgam_core::Value;
-
-/// Parse a YAML string into a list of [`Value`] documents.
-pub fn from_str(input: &str) -> Result<Vec<Value>, ComposeError> {
-    Composer::from_str(input)
-}
-
-/// Parse a YAML string into a single [`Value`].
-/// Returns Null for empty input, error for multiple documents.
-pub fn from_str_single(input: &str) -> Result<Value, ComposeError> {
-    let mut docs = Composer::from_str(input)?;
-    match docs.len() {
-        0 => Ok(Value::Null),
-        1 => Ok(docs.remove(0)),
-        n => Err(ComposeError::UnexpectedEvent(format!(
-            "expected 1 document, got {n}",
-        ))),
-    }
-}
-
-/// Parse a YAML string into a list of [`Value`] documents with resource limits.
-pub fn from_str_with_config(
-    input: &str,
-    config: &yamalgam_core::LoaderConfig,
-) -> Result<Vec<Value>, ComposeError> {
-    Composer::from_str_with_config(input, config)
-}
-
-/// Parse a YAML string into a single [`Value`] with resource limits.
-pub fn from_str_single_with_config(
-    input: &str,
-    config: &yamalgam_core::LoaderConfig,
-) -> Result<Value, ComposeError> {
-    let mut docs = Composer::from_str_with_config(input, config)?;
-    match docs.len() {
-        0 => Ok(Value::Null),
-        1 => Ok(docs.remove(0)),
-        n => Err(ComposeError::UnexpectedEvent(format!(
-            "expected 1 document, got {n}",
-        ))),
-    }
-}
