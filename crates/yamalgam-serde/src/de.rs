@@ -27,7 +27,7 @@ pub struct Deserializer<'input> {
     /// Resource limits for anchor/alias caps and future extensions.
     limits: ResourceLimits,
     /// True once `StreamEnd` has been consumed or an error occurred.
-    finished: bool,
+    pub(crate) finished: bool,
     /// True when we've consumed `DocumentStart` and are inside a document.
     at_document_start: bool,
     /// Buffered event sequences keyed by anchor name.
@@ -76,13 +76,33 @@ impl<'input> Deserializer<'input> {
         }
     }
 
+    /// Create a streaming iterator over documents in a multi-document YAML
+    /// stream.
+    ///
+    /// Each call to `Iterator::next()` deserializes one document into `T`.
+    /// Iteration stops at `StreamEnd` or on the first error.
+    ///
+    /// ```ignore
+    /// let docs: Vec<i64> = Deserializer::from_str("---\n42\n---\n99")
+    ///     .documents::<i64>()
+    ///     .collect::<Result<_, _>>()
+    ///     .unwrap();
+    /// assert_eq!(docs, vec![42, 99]);
+    /// ```
+    pub const fn documents<T>(self) -> crate::Documents<'input, T>
+    where
+        T: serde::Deserialize<'input>,
+    {
+        crate::Documents::new(self)
+    }
+
     /// Consume the next raw event from the replay buffer or main iterator,
     /// skipping structural events and auto-consuming stream/document framing.
     ///
     /// This is the low-level event source that does NOT perform anchor/alias
     /// processing. Used internally by `next_event()` and by the anchor
     /// buffering loop.
-    fn next_raw_event(&mut self) -> Result<Event<'input>, Error> {
+    pub(crate) fn next_raw_event(&mut self) -> Result<Event<'input>, Error> {
         loop {
             // Drain replay buffer first.
             let event = if let Some(ev) = self.replay_buffer.pop_front() {
@@ -224,6 +244,25 @@ impl<'input> Deserializer<'input> {
             .map_err(Error::LimitExceeded)?;
         self.anchors.insert(name, events);
         Ok(())
+    }
+
+    /// Peek the next raw event without consuming it.
+    ///
+    /// Unlike `peek_event`, this does NOT process anchors/aliases. It
+    /// advances through structural + framing events (same as `next_raw_event`)
+    /// but stashes the result for the next `next_raw_event` call.
+    pub(crate) fn peek_raw_event(&mut self) -> Result<&Event<'input>, Error> {
+        // If replay_buffer already has a visible event at the front, return it.
+        if let Some(front) = self.replay_buffer.front()
+            && !front.is_structural()
+            && !matches!(front, Event::StreamStart | Event::DocumentStart { .. })
+        {
+            return Ok(self.replay_buffer.front().unwrap());
+        }
+
+        let event = self.next_raw_event()?;
+        self.replay_buffer.push_front(event);
+        Ok(self.replay_buffer.front().unwrap())
     }
 
     /// Peek the next semantic event without consuming it.

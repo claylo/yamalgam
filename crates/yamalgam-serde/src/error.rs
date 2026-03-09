@@ -82,3 +82,9 @@ impl From<ResolveError> for Error {
         Self::Resolve(e)
     }
 }
+
+impl From<erased_serde::Error> for Error {
+    fn from(e: erased_serde::Error) -> Self {
+        Self::Custom(e.to_string())
+    }
+}
