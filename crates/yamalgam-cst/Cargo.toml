@@ -1,0 +1,17 @@
+[package]
+name = "yamalgam-cst"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lossless concrete syntax tree for YAML"
+publish = false
+
+[dependencies]
+yamalgam-core = { path = "../yamalgam-core" }
+yamalgam-parser = { path = "../yamalgam-parser" }
+yamalgam-scanner = { path = "../yamalgam-scanner" }
+
+[lints]
+workspace = true

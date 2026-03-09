@@ -8,7 +8,7 @@
 //! the one-call path.
 //!
 //! ```
-//! use yamalgam_parser::cst::parse_to_cst;
+//! use yamalgam_cst::parse_to_cst;
 //!
 //! let input = "key: value # comment\n";
 //! let cst = parse_to_cst(input);
@@ -20,9 +20,9 @@ use std::fmt;
 
 use yamalgam_core::Span;
 
-use crate::error::ParseError;
-use crate::event::Event;
-use crate::parser::Parser;
+use yamalgam_parser::ParseError;
+use yamalgam_parser::Event;
+use yamalgam_parser::Parser;
 
 // ---------------------------------------------------------------------------
 // Node kinds
