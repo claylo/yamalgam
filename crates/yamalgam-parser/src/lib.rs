@@ -18,6 +18,7 @@
 #![deny(unsafe_code)]
 
 pub mod compose;
+pub mod cst;
 pub mod error;
 pub mod event;
 pub mod parser;
