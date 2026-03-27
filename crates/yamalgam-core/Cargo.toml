@@ -8,6 +8,7 @@ description = "Core library for yamalgam"
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
+autobenches = false
 exclude = [
     # Workspace-level files (/ = workspace root)
     "/.claude/",
