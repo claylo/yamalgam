@@ -34,6 +34,4 @@ mod config {
     fn construct_loader() -> ConfigLoader {
         black_box(ConfigLoader::new())
     }
-
 }
-
