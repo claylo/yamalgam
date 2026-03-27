@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use yamalgam_compare::test_case::extract_test_cases;
-use yamalgam_parser::cst::parse_to_cst;
+use yamalgam_cst::parse_to_cst;
 
 /// Known round-trip failures that are understood and acceptable.
 ///

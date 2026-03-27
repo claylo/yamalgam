@@ -4,18 +4,17 @@
 //! [`Parser`] wrapped in [`ResolvedEvents`]) and assembles one or more
 //! [`Value`] documents. Anchors and aliases are resolved during composition,
 //! and merge keys (`<<`) are handled per the YAML merge-key spec.
+#![deny(unsafe_code)]
 
 use std::collections::HashMap;
 
 use yamalgam_core::tag::Yaml12TagResolver;
 use yamalgam_core::tag_resolution::TagResolver;
 use yamalgam_core::{Mapping, ResourceLimits, Value};
+use yamalgam_parser::{
+    Event, NoopResolver, ParseError, Parser, ResolveError, ResolvedEvents, Resolver,
+};
 use yamalgam_scanner::ScalarStyle;
-
-use crate::error::ParseError;
-use crate::event::Event;
-use crate::parser::Parser;
-use crate::resolve::{NoopResolver, ResolveError, ResolvedEvents, Resolver};
 
 /// Errors that can occur during composition (event-to-Value conversion).
 #[derive(Debug)]
@@ -95,7 +94,7 @@ impl<'input> Composer<'input, ResolvedEvents<'input, NoopResolver>> {
         input: &'input str,
         config: &yamalgam_core::LoaderConfig,
     ) -> Result<Vec<Value>, ComposeError> {
-        let parser = crate::parser::Parser::with_config(input, config);
+        let parser = Parser::with_config(input, config);
         let events = ResolvedEvents::new(
             Box::new(parser.map(|r| r.map_err(ResolveError::Parse))),
             NoopResolver,
@@ -109,7 +108,7 @@ impl<'input> Composer<'input, ResolvedEvents<'input, NoopResolver>> {
         input: &'input str,
         tag_resolver: impl TagResolver + 'static,
     ) -> Result<Vec<Value>, ComposeError> {
-        let parser = crate::parser::Parser::new(input);
+        let parser = Parser::new(input);
         let events = ResolvedEvents::new(
             Box::new(parser.map(|r| r.map_err(ResolveError::Parse))),
             NoopResolver,
@@ -503,6 +502,47 @@ fn collect_merge_pairs(
     }
 }
 
+/// Parse a YAML string into a list of [`Value`] documents.
+pub fn from_str(input: &str) -> Result<Vec<Value>, ComposeError> {
+    Composer::from_str(input)
+}
+
+/// Parse a YAML string into a single [`Value`].
+/// Returns Null for empty input, error for multiple documents.
+pub fn from_str_single(input: &str) -> Result<Value, ComposeError> {
+    let mut docs = Composer::from_str(input)?;
+    match docs.len() {
+        0 => Ok(Value::Null),
+        1 => Ok(docs.remove(0)),
+        n => Err(ComposeError::UnexpectedEvent(format!(
+            "expected 1 document, got {n}",
+        ))),
+    }
+}
+
+/// Parse a YAML string into a list of [`Value`] documents with resource limits.
+pub fn from_str_with_config(
+    input: &str,
+    config: &yamalgam_core::LoaderConfig,
+) -> Result<Vec<Value>, ComposeError> {
+    Composer::from_str_with_config(input, config)
+}
+
+/// Parse a YAML string into a single [`Value`] with resource limits.
+pub fn from_str_single_with_config(
+    input: &str,
+    config: &yamalgam_core::LoaderConfig,
+) -> Result<Value, ComposeError> {
+    let mut docs = Composer::from_str_with_config(input, config)?;
+    match docs.len() {
+        0 => Ok(Value::Null),
+        1 => Ok(docs.remove(0)),
+        n => Err(ComposeError::UnexpectedEvent(format!(
+            "expected 1 document, got {n}",
+        ))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -696,10 +736,10 @@ production:
             },
             ..LoaderConfig::unchecked()
         };
-        let parser = crate::parser::Parser::with_config("a: &a 1\nb: &b 2\nc: &c 3", &config);
-        let events = crate::resolve::ResolvedEvents::new(
-            Box::new(parser.map(|r| r.map_err(crate::resolve::ResolveError::Parse))),
-            crate::resolve::NoopResolver,
+        let parser = Parser::with_config("a: &a 1\nb: &b 2\nc: &c 3", &config);
+        let events = ResolvedEvents::new(
+            Box::new(parser.map(|r| r.map_err(ResolveError::Parse))),
+            NoopResolver,
         );
         let mut composer = Composer::new_with_config(events, &config);
         let result = composer.compose_stream();
@@ -716,10 +756,10 @@ production:
             },
             ..LoaderConfig::unchecked()
         };
-        let parser = crate::parser::Parser::with_config("a: &ref val\nb: *ref\nc: *ref", &config);
-        let events = crate::resolve::ResolvedEvents::new(
-            Box::new(parser.map(|r| r.map_err(crate::resolve::ResolveError::Parse))),
-            crate::resolve::NoopResolver,
+        let parser = Parser::with_config("a: &ref val\nb: *ref\nc: *ref", &config);
+        let events = ResolvedEvents::new(
+            Box::new(parser.map(|r| r.map_err(ResolveError::Parse))),
+            NoopResolver,
         );
         let mut composer = Composer::new_with_config(events, &config);
         let result = composer.compose_stream();

@@ -2,9 +2,9 @@
 
 use std::borrow::Cow;
 
+use yamalgam_compose::{Composer, from_str, from_str_single};
 use yamalgam_core::Value;
-use yamalgam_parser::compose::Composer;
-use yamalgam_parser::{Event, ResolveError, Resolver, from_str, from_str_single};
+use yamalgam_parser::{Event, ResolveError, Resolver};
 
 #[test]
 fn parse_simple_mapping() {
