@@ -2,11 +2,11 @@
 
 preamble {
     code #"""
-        use yamalgam_core::config::{Config, ConfigLoader};
+        use yamalgam_core::config::{Config, ConfigLoader, ConfigSources};
         """#
 }
 
-benchmark name="load_defaults" module="config" return="Config" {
+benchmark name="load_defaults" module="config" return="(Config, ConfigSources)" {
     body #"""
         black_box(
             ConfigLoader::new()

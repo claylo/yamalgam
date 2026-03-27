@@ -10,7 +10,7 @@
 
 use std::hint::black_box;
 
-use yamalgam_core::config::{Config, ConfigLoader};
+use yamalgam_core::config::{Config, ConfigLoader, ConfigSources};
 
 fn main() {
     divan::main();
@@ -20,7 +20,7 @@ mod config {
     use super::*;
 
     #[divan::bench]
-    fn load_defaults() -> Config {
+    fn load_defaults() -> (Config, ConfigSources) {
         black_box(
             ConfigLoader::new()
                 .with_user_config(false)
