@@ -3,7 +3,7 @@
 //! Wall-clock time benchmarks for fast local iteration.
 //! Run with: `cargo bench --bench divan_benchmarks`
 //!
-//! AUTO-GENERATED from crates/yamalgam-core/benches/benchmarks.kdl.
+//! AUTO-GENERATED from crates/yamalgam-core/benches/benchmarks.toml.
 //! Do not edit directly. Run `cargo xtask gen-benchmarks` to regenerate.
 //!
 //! See docs/benchmarks-howto.md for more information.

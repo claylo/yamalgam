@@ -27,7 +27,7 @@ struct Xtask {
 
 #[derive(Subcommand, Debug)]
 enum Task {
-    /// Generate benchmark harnesses from benches/benchmarks.kdl.
+    /// Generate benchmark harnesses from benches/benchmarks.toml.
     GenBenchmarks,
 
     /// Run benchmarks (divan, gungraun, hyperfine).
